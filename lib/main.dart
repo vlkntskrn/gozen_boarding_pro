@@ -1649,15 +1649,16 @@ class _ScanTabState extends State<ScanTab> {
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   // -------- Scan helpers --------
   String _normalizeFlightCode(String code) {
-    final c = code.trim().toUpperCase().replaceAll(' ', '');
-    // Common format: 2-3 letters + digits (ignore leading zeros on digits)
-    final m = RegExp(r'^([A-Z]{2,3})(\d+)$').firstMatch(c);
+    final c = code
+        .toUpperCase()
+        .replaceAll(RegExp(r'[^A-Z0-9]'), '')
+        .trim();
+    final m = RegExp(r'^([A-Z0-9]{2,3})(0*[0-9]{1,6})$').firstMatch(c);
     if (m == null) return c;
-    final prefix = m.group(1)!;
-    final digitsRaw = m.group(2)!;
-    final digits = digitsRaw.replaceFirst(RegExp(r'^0+'), '');
-    final normalizedDigits = digits.isEmpty ? '0' : digits;
-    return '$prefix$normalizedDigits';
+    final carrier = m.group(1) ?? '';
+    var num = (m.group(2) ?? '').replaceFirst(RegExp(r'^0+'), '');
+    if (num.isEmpty) num = '0';
+    return '$carrier$num';
   }
   String _normalizeName(String s) {
     var v = s.trim().toLowerCase();
@@ -1742,49 +1743,84 @@ class _ScanTabState extends State<ScanTab> {
     return out.where((e) => e.isNotEmpty).toSet();
   }
 
-  String _extractFlightCode(String raw) {
-    // Robust flight code extraction across common boarding pass layouts.
-    // Accepts patterns like: "BA 679", "LS1850", "XQ0688", "TOM 836", "FH 612".
-    String norm(String s) {
-      final up = s.toUpperCase();
-      final buf = StringBuffer();
-      for (final r in up.runes) {
-        final isAZ = (r >= 65 && r <= 90);
-        final is09 = (r >= 48 && r <= 57);
-        buf.write((isAZ || is09) ? String.fromCharCode(r) : ' ');
-      }
-      return buf.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+  String _extractFlightCode(String input) {
+    // Supports:
+    // 1) Plain text like "LS0476", "BA 2245", "EXS 00476"
+    // 2) IATA BCBP (PDF417) fixed-width format starting with "M1"
+    //
+    // Returns canonical flight code: <carrier><flightNo>, with flightNo stripped of leading zeros.
+    final raw = input
+        .toUpperCase()
+        // Remove common control chars (GS=29, RS=30, US=31, etc.)
+        .replaceAll(RegExp(r'[\x00-\x1F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    String canon(String carrier, String flightNo) {
+      final c = carrier.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+      var n = flightNo.replaceAll(RegExp(r'[^0-9]'), '');
+      n = n.replaceFirst(RegExp(r'^0+'), '');
+      if (n.isEmpty) n = '0';
+      return '$c$n';
     }
 
-    final n = norm(raw);
-
-    // 1) Compact pattern already: ABC123 / AB1234
-    final compact = RegExp(r'\b[A-Z]{2,3}\d{3,4}\b').firstMatch(n.replaceAll(' ', ''));
-    if (compact != null) return compact.group(0) ?? '';
-
-    // 2) Separated airline + number: "BA 679", "LS 1850", "TOM 836"
-    final stop = <String>{
-      'SEQ', 'PNR', 'GATE', 'SEAT', 'FROM', 'TO', 'NAME', 'CLASS', 'DATE', 'TIME',
-      'PCS', 'WT', 'BAGS', 'GROUP', 'BOARD', 'BOARDING', 'DEPART', 'DEPARTS',
-      'ARRIVE', 'ARRIVES', 'ETKT', 'TKT', 'TKNE', 'SECURITY', 'CHECKIN'
+    // ICAO->IATA mapping for common airlines seen on boarding passes.
+    // (BCBP uses a 3-char "operating carrier designator"; ops usually use 2-char IATA.)
+    const icaoToIata = <String, String>{
+      'EXS': 'LS', // Jet2
+      'BAW': 'BA', // British Airways
+      'TOM': 'BY', // TUI Airways
+      'TFL': 'OR', // TUI fly Netherlands
+      'FHY': 'FH', // Freebird
+      // Add more as you encounter them.
     };
 
-    for (final m in RegExp(r'\b([A-Z]{2,3})\s*([0-9]{3,4})\b').allMatches(n)) {
-      final a = (m.group(1) ?? '').trim();
-      final num = (m.group(2) ?? '').trim();
-      if (a.isEmpty || num.isEmpty) continue;
-      if (stop.contains(a)) continue;
-      return '$a$num';
+    // ---- 1) BCBP fixed position parse (best signal) ----
+    // Minimal BCBP length is ~60+ chars. We look for segment starting with M1/M2.
+    final bcbpIdx = raw.indexOf(RegExp(r'\bM[0-9]'));
+    if (bcbpIdx >= 0 && raw.length >= bcbpIdx + 45) {
+      // Layout (IATA BCBP):
+      // 2: format code (M1)
+      // 20: passenger name
+      // 1: electronic ticket indicator
+      // 7: PNR
+      // 3+3: from/to
+      // 3: operating carrier designator
+      // 5: flight number (right aligned, can include spaces/zeros)
+      try {
+        final carrier3 = raw.substring(bcbpIdx + 36, bcbpIdx + 39).trim();
+        final flight5 = raw.substring(bcbpIdx + 39, bcbpIdx + 44).trim();
+        if (carrier3.isNotEmpty && flight5.isNotEmpty) {
+          final mapped = icaoToIata[carrier3] ?? carrier3;
+          return canon(mapped, flight5);
+        }
+      } catch (_) {
+        // fall through
+      }
     }
 
-    // 3) Loose fallback on raw text
-    final loose = RegExp(r'\b([A-Z]{2})(?:\s|-)?(\d{3,4})\b').firstMatch(raw.toUpperCase());
-    if (loose != null) {
-      final a = loose.group(1) ?? '';
-      final num = loose.group(2) ?? '';
-      if (a.isNotEmpty && num.isNotEmpty && !stop.contains(a)) return '$a$num';
+    // ---- 2) Generic regex extraction (handles lots of vendor variations) ----
+    // Prefer patterns with 2-3 letters then 1-5 digits.
+    final m = RegExp(r'\b([A-Z0-9]{2,3})\s*0*([0-9]{1,5})\b').firstMatch(raw);
+    if (m != null) {
+      final carrier = m.group(1) ?? '';
+      final number = m.group(2) ?? '';
+      final mapped = carrier.length == 3 ? (icaoToIata[carrier] ?? carrier) : carrier;
+      return canon(mapped, number);
     }
-    return '';
+
+    // ---- 3) Last resort: scan for any digit-run that looks like a flight number near a carrier ----
+    // Some decoders remove separators; try sliding window.
+    final all = RegExp(r'([A-Z]{2,3})([0-9]{2,6})').allMatches(raw).toList();
+    if (all.isNotEmpty) {
+      final mm = all.first;
+      final carrier = mm.group(1) ?? '';
+      final number = mm.group(2) ?? '';
+      final mapped = carrier.length == 3 ? (icaoToIata[carrier] ?? carrier) : carrier;
+      return canon(mapped, number);
+    }
+
+    throw Exception('Boarding kart içinden uçuş kodu okunamadı');
   }
 
 
