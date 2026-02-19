@@ -1743,9 +1743,50 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   String _extractFlightCode(String raw) {
-    final m = RegExp(r'\b[A-Z]{2,3}\d{3,4}\b').firstMatch(raw.toUpperCase());
-    return m?.group(0) ?? '';
+    // Robust flight code extraction across common boarding pass layouts.
+    // Accepts patterns like: "BA 679", "LS1850", "XQ0688", "TOM 836", "FH 612".
+    String norm(String s) {
+      final up = s.toUpperCase();
+      final buf = StringBuffer();
+      for (final r in up.runes) {
+        final isAZ = (r >= 65 && r <= 90);
+        final is09 = (r >= 48 && r <= 57);
+        buf.write((isAZ || is09) ? String.fromCharCode(r) : ' ');
+      }
+      return buf.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    }
+
+    final n = norm(raw);
+
+    // 1) Compact pattern already: ABC123 / AB1234
+    final compact = RegExp(r'\b[A-Z]{2,3}\d{3,4}\b').firstMatch(n.replaceAll(' ', ''));
+    if (compact != null) return compact.group(0) ?? '';
+
+    // 2) Separated airline + number: "BA 679", "LS 1850", "TOM 836"
+    final stop = <String>{
+      'SEQ', 'PNR', 'GATE', 'SEAT', 'FROM', 'TO', 'NAME', 'CLASS', 'DATE', 'TIME',
+      'PCS', 'WT', 'BAGS', 'GROUP', 'BOARD', 'BOARDING', 'DEPART', 'DEPARTS',
+      'ARRIVE', 'ARRIVES', 'ETKT', 'TKT', 'TKNE', 'SECURITY', 'CHECKIN'
+    };
+
+    for (final m in RegExp(r'\b([A-Z]{2,3})\s*([0-9]{3,4})\b').allMatches(n)) {
+      final a = (m.group(1) ?? '').trim();
+      final num = (m.group(2) ?? '').trim();
+      if (a.isEmpty || num.isEmpty) continue;
+      if (stop.contains(a)) continue;
+      return '$a$num';
+    }
+
+    // 3) Loose fallback on raw text
+    final loose = RegExp(r'\b([A-Z]{2})(?:\s|-)?(\d{3,4})\b').firstMatch(raw.toUpperCase());
+    if (loose != null) {
+      final a = loose.group(1) ?? '';
+      final num = loose.group(2) ?? '';
+      if (a.isNotEmpty && num.isNotEmpty && !stop.contains(a)) return '$a$num';
+    }
+    return '';
   }
+
 
   String _extractSeat(String raw) {
     final m = RegExp(r'\b\d{1,2}[A-Z]\b').firstMatch(raw.toUpperCase());
