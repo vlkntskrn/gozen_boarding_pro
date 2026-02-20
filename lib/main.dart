@@ -1197,22 +1197,9 @@ class _ScanTabState extends State<ScanTab> {
   DateTime? _lastCamHitAt;
   String? _lastCamRaw;
 
-  late final MobileScannerController _scannerController = MobileScannerController(
-    formats: [
-      BarcodeFormat.qrCode,
-      BarcodeFormat.aztec,
-      BarcodeFormat.pdf417,
-      BarcodeFormat.dataMatrix,
-      BarcodeFormat.code128,
-      BarcodeFormat.code39,
-      BarcodeFormat.code93,
-      BarcodeFormat.ean13,
-      BarcodeFormat.ean8,
-      BarcodeFormat.upcA,
-      BarcodeFormat.upcE,
-      BarcodeFormat.itf,
-    ],
-  );
+  late final MobileScannerController _scannerController = MobileScannerController();
+
+  bool _torchOn = false;
 
 
   
@@ -1932,65 +1919,60 @@ class _ScanTabState extends State<ScanTab> {
                 const Divider(height: 24),
                 SizedBox(
                   width: double.infinity,
-                  child: 
-          SwitchListTile(
-            value: _cameraOn,
-            onChanged: (v) => setState(() => _cameraOn = v),
-            title: const Text('Kamera (Scan)'),
-            subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
-          ),
-          if (_cameraOn) ...[
-            const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: AspectRatio(
-                aspectRatio: 16 / 9,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    MobileScanner(
-                      controller: _scannerController,
-                      onDetect: _onCameraDetect,
-                    ),
-                    Align(
-                      alignment: Alignment.topRight,
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Torch',
-                              style: IconButton.styleFrom(
-                                backgroundColor: Colors.black.withOpacity(0.35),
-                              ),
-                              onPressed: () async {
-                                await _scannerController.toggleTorch();
-                                setState(() {});
-                              },
-                              icon: Icon(
-                                _scannerController.torchState == TorchState.on ? Icons.flash_on : Icons.flash_off,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton(
-                              tooltip: 'Kamera değiştir',
-                              style: IconButton.styleFrom(
-                                backgroundColor: Colors.black.withOpacity(0.35),
-                              ),
-                              onPressed: () async {
-                                await _scannerController.switchCamera();
-                                setState(() {});
-                              },
-                              icon: const Icon(Icons.cameraswitch, color: Colors.white),
-                            ),
-                          ],
+                  child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SwitchListTile(
+                value: _cameraOn,
+                onChanged: (v) => setState(() => _cameraOn = v),
+                title: const Text('Kamera (Scan)'),
+                subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
+              ),
+              if (_cameraOn) ...[
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        MobileScanner(
+                          controller: _scannerController,
+                          onDetect: _onCameraDetect,
                         ),
-                      ),
+                        Align(
+                          alignment: Alignment.topRight,
+                          child: Padding(
+                            padding: const EdgeInsets.all(8),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Torch',
+                                  onPressed: () async {
+                                    await _scannerController.toggleTorch();
+                                    if (mounted) setState(() => _torchOn = !_torchOn);
+                                  },
+                                  icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
+                const SizedBox(height: 8),
+                if (_lastParsedPreview != null)
+                  Text(
+                    _lastParsedPreview!,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+              ],
+            ],
+          )),
               ),
             ),
           ],
