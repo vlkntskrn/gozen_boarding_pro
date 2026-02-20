@@ -29,6 +29,230 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+class _AppPalette {
+  static const Color midnight = Color(0xFF07111E);
+  static const Color navy = Color(0xFF0D1B2A);
+  static const Color slate = Color(0xFF14273C);
+  static const Color steel = Color(0xFF23364B);
+  static const Color cyan = Color(0xFF57D6FF);
+  static const Color ice = Color(0xFFE9F7FF);
+  static const Color gold = Color(0xFFFFD27A);
+}
+
+class _AppTheme {
+  static ThemeData light() {
+    final base = ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.light,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _AppPalette.cyan,
+        brightness: Brightness.light,
+      ),
+    );
+    return base.copyWith(
+      scaffoldBackgroundColor: const Color(0xFFF3F7FB),
+      appBarTheme: const AppBarTheme(
+        centerTitle: false,
+        backgroundColor: Colors.transparent,
+        foregroundColor: Color(0xFF07111E),
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        color: Colors.white.withOpacity(0.92),
+        elevation: 10,
+        shadowColor: Colors.black.withOpacity(0.08),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        margin: EdgeInsets.zero,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white.withOpacity(0.9),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.black.withOpacity(0.08)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.black.withOpacity(0.08)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: _AppPalette.cyan, width: 1.4),
+        ),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        ),
+      ),
+      chipTheme: base.chipTheme.copyWith(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+      ),
+      listTileTheme: const ListTileThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(14)),
+        ),
+      ),
+    );
+  }
+
+  static ThemeData dark() {
+    final base = ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _AppPalette.cyan,
+        brightness: Brightness.dark,
+      ),
+    );
+    return base.copyWith(
+      scaffoldBackgroundColor: _AppPalette.midnight,
+      appBarTheme: const AppBarTheme(
+        centerTitle: false,
+        backgroundColor: Colors.transparent,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        color: const Color(0xCC101D2D),
+        elevation: 10,
+        shadowColor: Colors.black54,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        margin: EdgeInsets.zero,
+      ),
+      dividerColor: Colors.white.withOpacity(0.08),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white.withOpacity(0.05),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.10)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.10)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: _AppPalette.cyan, width: 1.4),
+        ),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: _AppPalette.cyan,
+          foregroundColor: _AppPalette.midnight,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        ),
+      ),
+      floatingActionButtonTheme: const FloatingActionButtonThemeData(
+        backgroundColor: _AppPalette.cyan,
+        foregroundColor: _AppPalette.midnight,
+      ),
+      listTileTheme: ListTileThemeData(
+        iconColor: Colors.white.withOpacity(0.90),
+        textColor: Colors.white,
+        tileColor: Colors.white.withOpacity(0.02),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(14)),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlobalBackdrop extends StatelessWidget {
+  final Widget child;
+  const _GlobalBackdrop({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: dark
+                  ? const [_AppPalette.midnight, _AppPalette.navy, Color(0xFF06101A)]
+                  : const [Color(0xFFF7FBFF), Color(0xFFEAF2FA), Color(0xFFF8FAFD)],
+            ),
+          ),
+        ),
+        Positioned(
+          top: -60,
+          right: -30,
+          child: IgnorePointer(
+            child: Container(
+              width: 220,
+              height: 220,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: (dark ? _AppPalette.cyan : Colors.white).withOpacity(dark ? 0.10 : 0.65),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          bottom: -100,
+          left: -80,
+          child: IgnorePointer(
+            child: Container(
+              width: 260,
+              height: 260,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: (dark ? _AppPalette.gold : _AppPalette.cyan).withOpacity(dark ? 0.06 : 0.08),
+              ),
+            ),
+          ),
+        ),
+        child,
+      ],
+    );
+  }
+}
+
+class _GlassPanel extends StatelessWidget {
+  final Widget child;
+  final EdgeInsetsGeometry? padding;
+  const _GlassPanel({required this.child, this.padding});
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: dark ? Colors.white.withOpacity(0.04) : Colors.white.withOpacity(0.80),
+        border: Border.all(
+          color: dark ? Colors.white.withOpacity(0.10) : Colors.white.withOpacity(0.75),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(dark ? 0.35 : 0.06),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: padding ?? const EdgeInsets.all(16),
+        child: child,
+      ),
+    );
+  }
+}
+
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
@@ -55,15 +279,9 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       title: 'GOZEN BOARDING PRO',
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.blue,
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.blue,
-      ),
+      theme: _AppTheme.light(),
+      darkTheme: _AppTheme.dark(),
+      builder: (context, child) => _GlobalBackdrop(child: child ?? const SizedBox.shrink()),
       home: AuthGate(
         onThemeChanged: setThemeMode,
         themeMode: _themeMode,
@@ -110,8 +328,25 @@ class _Splash extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(child: CircularProgressIndicator()),
+    return Scaffold(
+      body: Center(
+        child: _GlassPanel(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              Icon(Icons.local_airport_rounded, size: 38),
+              SizedBox(height: 10),
+              Text(
+                'GOZEN BOARDING PRO',
+                style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: .6),
+              ),
+              SizedBox(height: 12),
+              SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -252,7 +487,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Login'),
+        title: const Text('GOZEN Crew Access'),
         actions: [
           Row(
             children: [
@@ -268,26 +503,49 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
+          constraints: const BoxConstraints(maxWidth: 460),
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
+            child: _GlassPanel(
+              padding: const EdgeInsets.all(18),
+              child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Kurumsal Boarding Operasyonu',
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Yetkili personel girişi • gerçek zamanlı boarding • offline queue sync',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     TextField(
                       controller: _email,
                       decoration: const InputDecoration(
                         labelText: 'Kullanıcı Adı (email)',
+                        prefixIcon: Icon(Icons.badge_outlined),
                       ),
                       keyboardType: TextInputType.emailAddress,
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _pass,
-                      decoration: const InputDecoration(labelText: 'Şifre'),
+                      decoration: const InputDecoration(
+                        labelText: 'Şifre',
+                        prefixIcon: Icon(Icons.lock_outline_rounded),
+                      ),
                       obscureText: true,
                     ),
                     const SizedBox(height: 16),
@@ -315,9 +573,17 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Not: Bu demo akışta kullanıcı yoksa otomatik kayıt olur.',
-                      style: TextStyle(fontSize: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(.45),
+                      ),
+                      child: const Text(
+                        'Not: Demo akışta kullanıcı yoksa otomatik kayıt olur.',
+                        style: TextStyle(fontSize: 12),
+                      ),
                     ),
                   ],
                 ),
@@ -369,7 +635,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Uçuşlar'),
+            title: const Text('GOZEN Boarding Ops'),
             actions: [
               Row(
                 children: [
@@ -412,13 +678,20 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: const Icon(Icons.add),
             label: const Text('Uçuş Oluştur'),
           ),
-          body: Column(
-            children: [
-              _PendingInvitesBar(uid: _uid),
-              Expanded(
-                child: FlightsList(uid: _uid, role: role),
-              ),
-            ],
+          body: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+            child: Column(
+              children: [
+                _PendingInvitesBar(uid: _uid),
+                const SizedBox(height: 6),
+                Expanded(
+                  child: _GlassPanel(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                    child: FlightsList(uid: _uid, role: role),
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -517,13 +790,13 @@ class _PendingInvitesBar extends StatelessWidget {
         final docs = snap.data?.docs ?? [];
         if (docs.isEmpty) return const SizedBox.shrink();
 
-        return Material(
-          color: Theme.of(context).colorScheme.tertiaryContainer,
-          child: Padding(
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: _GlassPanel(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
-                const Icon(Icons.mail),
+                const Icon(Icons.mark_email_unread_outlined),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text('Bekleyen davet var: ${docs.length}'),
@@ -1288,93 +1561,125 @@ class _ScanTabState extends State<ScanTab> {
     return a.intersection(b).isNotEmpty;
   }
 
-  Map<String, String> _parseScanPayload(String raw) {
-    final r = raw.trim();
+  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
+    final r = _sanitizeScanRaw(raw).trim();
     if (r.isEmpty) return {};
 
-    // 1) Our custom payload: FLIGHT|NAME|SEAT|PNR (legacy)
     if (r.contains('|')) {
       final parts = r.split('|').map((e) => e.trim()).toList();
-      if (parts.isNotEmpty) {
-        return {
-          'flightCode': parts.isNotEmpty ? parts[0] : '',
-          'fullName': parts.length > 1 ? parts[1] : '',
-          'seat': parts.length > 2 ? parts[2] : '',
-          'pnr': parts.length > 3 ? parts[3] : '',
-        };
-      }
+      return {
+        'flightCode': parts.isNotEmpty ? parts[0] : '',
+        'fullName': parts.length > 1 ? parts[1] : '',
+        'seat': parts.length > 2 ? parts[2] : '',
+        'pnr': parts.length > 3 ? parts[3] : '',
+      };
     }
 
-    // 2) IATA BCBP (PDF417/QR payload) – minimal fixed-position parse
-    // We only need: passenger name, flight designator, seat, PNR.
-    // Reference layout: 1(format) + 1(legs) + 20(name) + 1(ETKT) + 7(PNR) ... then per-leg fields.
     final up = r.toUpperCase();
-    if (up.length >= 52 && (up.startsWith('M') || up.startsWith('S'))) {
+    if (up.length >= 40 && (up.startsWith('M') || up.startsWith('S'))) {
       try {
-        final name = up.substring(2, 22).trim();
-        final pnr = up.substring(23, 30).trim();
+        final nameRaw = up.length >= 22 ? up.substring(2, 22).trim() : '';
+        final pnrRaw = up.length >= 30 ? up.substring(23, 30).trim() : '';
+        final name = _normalizeBcbpName(nameRaw);
+        final pnr = pnrRaw.replaceAll(RegExp(r'[^A-Z0-9]'), '');
 
-        final carrier3 = up.substring(36, 39).trim();
-        final flight5 = up.substring(39, 44).trim(); // often 5 incl leading zeros
-        final seat4 = up.substring(48, 52).trim();
+        String flightCode = '';
+        String flightCodeRaw = '';
+        String seat = '';
 
-        final flightNum = flight5.replaceFirst(RegExp(r'^0+'), '');
-        final seatNorm = seat4.replaceAll(' ', '').replaceFirst(RegExp(r'^0+'), '').replaceAll('-', '');
+        if (up.length >= 52) {
+          final carrier3 = up.substring(36, 39).trim().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+          final flight5 = up.substring(39, 44).trim();
+          final seat4 = up.substring(48, 52).trim();
+          final flightNum = flight5.replaceAll(RegExp(r'[^0-9]'), '').replaceFirst(RegExp(r'^0+'), '');
+          seat = seat4.replaceAll(' ', '').replaceAll('-', '').replaceFirst(RegExp(r'^0+'), '');
+          if (carrier3.isNotEmpty && flightNum.isNotEmpty) {
+            final carrier2 = _icaoToIata[carrier3] ?? carrier3;
+            flightCode = '$carrier2$flightNum';
+            flightCodeRaw = '$carrier3$flightNum';
+          }
+        }
 
-        // Prefer IATA if mapping exists, but keep ICAO tolerant matching anyway.
-        final carrier2 = _icaoToIata[carrier3] ?? carrier3;
+        final regexFlight = _extractFlightCodeLoose(up, expectedFlightCode: expectedFlightCode);
+        if (regexFlight.isNotEmpty) {
+          final fixedHits = flightCode.isNotEmpty && (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, flightCode);
+          final regexHits = (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, regexFlight);
+          if (flightCode.isEmpty || (!fixedHits && regexHits)) {
+            flightCode = regexFlight;
+            if (flightCodeRaw.isEmpty) flightCodeRaw = regexFlight;
+          }
+        }
 
-        return {
-          'flightCode': '$carrier2$flightNum',
-          'fullName': name,
-          'seat': seatNorm,
-          'pnr': pnr,
-          'flightCodeRaw': '$carrier3$flightNum', // helpful for diagnostics
-        };
-      } catch (_) {
-        // fall through
-      }
+        if (seat.isEmpty) seat = _extractSeatLoose(up);
+
+        if (flightCode.isNotEmpty || name.isNotEmpty || seat.isNotEmpty || pnr.isNotEmpty) {
+          return {
+            'flightCode': flightCode,
+            'fullName': name,
+            'seat': seat,
+            'pnr': pnr,
+            'flightCodeRaw': flightCodeRaw,
+          };
+        }
+      } catch (_) {}
     }
 
-    // 3) Fallback: try to extract flight code + seat from plain text
-    final fc = _extractFlightCodeLoose(r);
-    final seat = _extractSeatLoose(r);
     return {
-      'flightCode': fc,
-      'fullName': '',
-      'seat': seat,
+      'flightCode': _extractFlightCodeLoose(r, expectedFlightCode: expectedFlightCode),
+      'fullName': _normalizeBcbpName(r),
+      'seat': _extractSeatLoose(r),
       'pnr': '',
     };
   }
 
-  String _extractFlightCodeLoose(String raw) {
-    // Look for things like:
-    //  - "LS 1850"
-    //  - "BA679"
-    //  - "X3 117"
-    // We intentionally ignore the booking class letter that is often printed after the number.
-    final up = raw.toUpperCase();
+  String _sanitizeScanRaw(String raw) {
+    final sb = StringBuffer();
+    for (final c in raw.runes) {
+      if (c == 9 || c == 10 || c == 13) {
+        sb.write(' ');
+      } else if (c >= 32 && c <= 126) {
+        sb.writeCharCode(c);
+      } else {
+        sb.write(' ');
+      }
+    }
+    return sb.toString().replaceAll(RegExp(r'\s+'), ' ');
+  }
 
-    // 1) Prefer explicit airline-code + flight-number patterns.
-    final re1 = RegExp(r'\\b([A-Z0-9]{1,3})\\s*0*([0-9]{1,5})\\b');
+  String _normalizeBcbpName(String rawName) {
+    var up = rawName.toUpperCase().trim();
+    if (up.isEmpty) return '';
+    final m = RegExp(r'([A-Z]+)\/([A-Z]+)').firstMatch(up);
+    if (m != null) {
+      final last = m.group(1) ?? '';
+      var first = m.group(2) ?? '';
+      first = first.replaceAll(RegExp(r'(MR|MRS|MS|MISS|MSTR|MASTER|CHD|INF|INFT)$'), '');
+      return ('$last $first').trim();
+    }
+    up = up.replaceAll('/', ' ').replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+    return up.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  String _extractFlightCodeLoose(String raw, {String? expectedFlightCode}) {
+    final up = raw.toUpperCase();
+    final expected = (expectedFlightCode ?? '').trim();
+    final re1 = RegExp(r'\b([A-Z0-9]{1,3})\s*0*([0-9]{1,5})(?:\s*[A-Z])?\b');
     final matches = re1.allMatches(up).toList();
 
-    // Heuristic: prefer known airline codes (IATA or ICAO) and typical flight-number length.
     String best = '';
-    int bestScore = -1;
+    int bestScore = -999;
 
     for (final m in matches) {
       final code = (m.group(1) ?? '').trim();
       final num = (m.group(2) ?? '').trim();
       if (code.isEmpty || num.isEmpty) continue;
-
-      final candidate = '$code$num';
-      final n = _normalizeFlightCode(candidate);
+      final n = _normalizeFlightCode('$code$num');
+      if (n.isEmpty) continue;
 
       int score = 0;
       if (_iataToIcao.containsKey(code) || _icaoToIata.containsKey(code)) score += 5;
       if (num.length >= 2 && num.length <= 4) score += 2;
-
+      if (expected.isNotEmpty && _flightCodeMatches(expected, n)) score += 100;
       if (score > bestScore) {
         bestScore = score;
         best = n;
@@ -1383,16 +1688,17 @@ class _ScanTabState extends State<ScanTab> {
 
     if (best.isNotEmpty) return best;
 
-    // 2) Fallback: any merged alnum chunk that looks like prefix+digits.
     final cleaned = up.replaceAll(RegExp(r'[^A-Z0-9]'), ' ');
-    final tokens = cleaned.split(RegExp(r'\\s+')).where((t) => t.isNotEmpty).toList();
+    final tokens = cleaned.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
     for (final t in tokens) {
       final n = _normalizeFlightCode(t);
-      if (RegExp(r'^[A-Z0-9]{1,3}[0-9]{1,5}[A-Z]?$').hasMatch(n)) return n;
+      if (RegExp(r'^[A-Z0-9]{1,3}[0-9]{1,5}[A-Z]?$').hasMatch(n)) {
+        if (expected.isEmpty || _flightCodeMatches(expected, n)) return n;
+        if (best.isEmpty) best = n;
+      }
     }
-    return '';
+    return best;
   }
-
 
   String _extractSeatLoose(String text) {
     final up = text.toUpperCase();
@@ -1556,7 +1862,9 @@ class _ScanTabState extends State<ScanTab> {
 
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw) async {
-    final parsed = _parseScanPayload(raw);
+    final fSnap0 = await widget.flightRef.get();
+    final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
+    final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
     if (parsed.isEmpty) {
       throw Exception('Scan verisi boş / anlaşılamadı.');
     }
@@ -1873,7 +2181,9 @@ class _ScanTabState extends State<ScanTab> {
     _lastCamHitAt = now;
 
     try {
-      final parsed = _parseScanPayload(raw);
+      final fSnap0 = await widget.flightRef.get();
+      final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
+      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
       if (mounted) {
         setState(() => _lastParsedPreview = _previewFromParsed(parsed, raw));
       }
@@ -3046,20 +3356,76 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
           ),
         ],
       ),
-      body: MobileScanner(
-        controller: _controller,
-        onDetect: _onDetect,
-        errorBuilder: (context, error, child) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Kamera açılamadı: ${error.errorDetails?.message ?? error.toString()}',
-                textAlign: TextAlign.center,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error, child) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Kamera açılamadı: ${error.errorDetails?.message ?? error.toString()}',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            },
+          ),
+          IgnorePointer(
+            child: Center(
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.82,
+                height: 220,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white.withOpacity(.95), width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _AppPalette.cyan.withOpacity(.20),
+                      blurRadius: 18,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    Align(
+                      alignment: Alignment.topCenter,
+                      child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan),
+                    ),
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan.withOpacity(.7)),
+                    ),
+                  ],
+                ),
               ),
             ),
-          );
-        },
+          ),
+          Positioned(
+            left: 14,
+            right: 14,
+            bottom: 18,
+            child: _GlassPanel(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.qr_code_scanner_rounded),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Kamera varsayılan açık • Biniş kartını çerçeve içine hizalayın',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
