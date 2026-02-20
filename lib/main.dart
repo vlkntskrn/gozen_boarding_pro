@@ -793,10 +793,10 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
   }
 
   bool _isValidFlightCode(String v) {
-    // Examples: LS976, BA2245
-    // Examples: LS976, BA2245, TOM857, XQ0688
-    final re = RegExp(r'^[A-Z]{2,3}\d{1,4}$');
-    return re.hasMatch(v.toUpperCase());
+    // Accept IATA(2) or ICAO(3) + optional spaces + 1-4 digits (+ optional suffix letter)
+    // Examples: LS1850, LS 1850, BA679, TOM 836, XQ0688, FH 612, OR3057
+    final up = v.trim().toUpperCase();
+    return RegExp(r'^[A-Z0-9]{2,3}\s*\d{1,4}[A-Z]?$').hasMatch(up);
   }
 
   Future<void> _addPaxDialog() async {
@@ -1856,13 +1856,13 @@ class _ScanTabState extends State<ScanTab> {
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    'Scan Kamera Ekranı (placeholder)',
+                    'Scan',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Kamera entegrasyonu sonraki adım (mobile_scanner vb.). Şimdilik manuel scan string ile simüle.',
+                  '"Kamera ile Tara" ile biniş kartındaki barkod/QR okutabilir veya aşağıya manuel scan string girebilirsin.',
                   style: TextStyle(fontSize: 12),
                 ),
                 const SizedBox(height: 12),
