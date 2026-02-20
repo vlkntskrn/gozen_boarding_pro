@@ -70,6 +70,7 @@
 	<!-- CAMERA PERMISSION -->
 	<key>NSCameraUsageDescription</key>
 	<string>Boarding pass taramak için kamera gerekli.</string>
-
+    <key>NSCameraUsageDescription</key>
+    <string>Boarding pass taramak için kamera gerekli.</string>
 </dict>
 </plist>
