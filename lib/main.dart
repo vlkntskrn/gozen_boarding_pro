@@ -793,10 +793,10 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
   }
 
   bool _isValidFlightCode(String v) {
-    // Accept IATA(2) or ICAO(3) + optional spaces + 1-4 digits (+ optional suffix letter)
-    // Examples: LS1850, LS 1850, BA679, TOM 836, XQ0688, FH 612, OR3057
-    final up = v.trim().toUpperCase();
-    return RegExp(r'^[A-Z0-9]{2,3}\s*\d{1,4}[A-Z]?$').hasMatch(up);
+    // Examples: LS976, BA2245
+    // Examples: LS976, BA2245, TOM857, XQ0688
+    final re = RegExp(r'^[A-Z]{2,3}\d{1,4}$');
+    return re.hasMatch(v.toUpperCase());
   }
 
   Future<void> _addPaxDialog() async {
@@ -1191,6 +1191,30 @@ class _ScanTabState extends State<ScanTab> {
   final _manualScan = TextEditingController();
   bool _busy = false;
 
+  // Camera scanner (MobileScanner)
+  bool _cameraOn = true;
+  String? _lastParsedPreview;
+  DateTime? _lastCamHitAt;
+  String? _lastCamRaw;
+
+  late final MobileScannerController _scannerController = MobileScannerController(
+    formats: [
+      BarcodeFormat.qrCode,
+      BarcodeFormat.aztec,
+      BarcodeFormat.pdf417,
+      BarcodeFormat.dataMatrix,
+      BarcodeFormat.code128,
+      BarcodeFormat.code39,
+      BarcodeFormat.code93,
+      BarcodeFormat.ean13,
+      BarcodeFormat.ean8,
+      BarcodeFormat.upcA,
+      BarcodeFormat.upcE,
+      BarcodeFormat.itf,
+    ],
+  );
+
+
   
   // --- Flight code normalization & matching (IATA/ICAO tolerant) ---
   static const Map<String, String> _icaoToIata = {
@@ -1425,12 +1449,75 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   Future<bool> _isWatchlistMatch(String fullName) async {
-    final q = await widget.flightRef
-        .collection('watchlist')
-        .where('fullName', isEqualTo: fullName)
-        .limit(1)
-        .get();
-    return q.docs.isNotEmpty;
+    final scannedKeys = _nameKeyVariants(fullName);
+    if (scannedKeys.isEmpty) return false;
+
+    final snap = await widget.flightRef.collection('watchlist').limit(500).get();
+    for (final d in snap.docs) {
+      final data = d.data();
+      final wlName = (data['fullName'] ?? '').toString();
+      if (wlName.trim().isEmpty) continue;
+
+      // Prefer precomputed keys if present
+      final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
+      final wlKeys = <String>{};
+      if (stored != null) {
+        for (final v in stored) {
+          if (v is String && v.trim().isNotEmpty) wlKeys.add(v.trim().toUpperCase());
+        }
+      } else {
+        wlKeys.addAll(_nameKeyVariants(wlName));
+      }
+
+      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  Set<String> _nameKeyVariants(String s) {
+    var up = s.toUpperCase();
+
+    // Common titles / prefixes / suffixes found on boarding passes
+    const titles = [
+      'MR', 'MRS', 'MS', 'MISS', 'MSTR', 'MASTER',
+      'DR', 'PROF', 'SIR', 'MADAM',
+      'INF', 'INFT', 'INFANT', 'CHD', 'CHILD'
+    ];
+
+    // Replace separators with space, keep only A-Z0-9 and spaces
+    up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+    up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+    up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    if (up.isEmpty) return <String>{};
+
+    var tokens = up.split(' ').where((t) => t.isNotEmpty).toList();
+
+    // Strip titles from start/end (can repeat like "MR MR")
+    while (tokens.isNotEmpty && titles.contains(tokens.first)) tokens.removeAt(0);
+    while (tokens.isNotEmpty && titles.contains(tokens.last)) tokens.removeLast();
+
+    if (tokens.isEmpty) return <String>{};
+
+    final joined = tokens.join('');
+    final reversedJoined = tokens.reversed.join('');
+
+    final keys = <String>{};
+    keys.add(joined);
+    keys.add(reversedJoined);
+
+    // Also add bi-grams for robustness (e.g. LASTFIRSTMR glued)
+    if (tokens.length >= 2) {
+      keys.add(tokens[0] + tokens[1]);
+      keys.add(tokens[1] + tokens[0]);
+    }
+
+    // Add each token itself (handles single token watchlist entries)
+    for (final t in tokens) {
+      if (t.length >= 3) keys.add(t);
+    }
+
+    return keys;
   }
 
   Future<void> _showResultScreen({
@@ -1772,9 +1859,49 @@ class _ScanTabState extends State<ScanTab> {
     }
   }
 
+
+  String _truncate(String s, [int max = 140]) {
+    if (s.length <= max) return s;
+    return s.substring(0, max) + '…';
+  }
+
+  String _previewFromParsed(Map<String, String?> p, String raw) {
+    final fc = (p['flightCode'] ?? '').trim();
+    final nm = (p['fullName'] ?? '').trim();
+    final st = (p['seat'] ?? '').trim();
+    final pn = (p['pnr'] ?? '').trim();
+    return 'RAW: ${_truncate(raw)}\nFLIGHT: $fc  SEAT: $st  PNR: $pn\nNAME: $nm';
+  }
+
+  Future<void> _onCameraDetect(BarcodeCapture capture) async {
+    if (!_cameraOn) return;
+    final raw = capture.barcodes.isNotEmpty ? (capture.barcodes.first.rawValue ?? '') : '';
+    if (raw.trim().isEmpty) return;
+
+    final now = DateTime.now();
+    if (_lastCamRaw == raw && _lastCamHitAt != null && now.difference(_lastCamHitAt!).inMilliseconds < 1200) {
+      return;
+    }
+    _lastCamRaw = raw;
+    _lastCamHitAt = now;
+
+    try {
+      final parsed = _parseScanPayload(raw);
+      if (mounted) {
+        setState(() => _lastParsedPreview = _previewFromParsed(parsed, raw));
+      }
+      await _processScanString(raw);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _lastParsedPreview = 'SCAN ERROR: $e\nRAW: ${_truncate(raw)}');
+      }
+    }
+  }
+
   @override
   void dispose() {
     _manualScan.dispose();
+    _scannerController.dispose();
     super.dispose();
   }
 
@@ -1805,68 +1932,77 @@ class _ScanTabState extends State<ScanTab> {
                 const Divider(height: 24),
                 SizedBox(
                   width: double.infinity,
-                  child: ElevatedButton.icon(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Kamera ile Tara'),
-                    onPressed: _busy
-                        ? null
-                        : () async {
-                            final raw = await Navigator.of(context).push<String>(
-                              MaterialPageRoute(builder: (_) => const BoardingPassScannerPage()),
-                            );
-                            if (raw != null && raw.trim().isNotEmpty) {
-                              _manualScan.text = raw.trim();
-                              if (mounted) setState(() => _busy = true);
-                              try {
-                                await _processScanString(raw.trim());
-                              } finally {
-                                if (mounted) setState(() => _busy = false);
-                              }
-                            }
-                          },
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
+                  child: 
+          SwitchListTile(
+            value: _cameraOn,
+            onChanged: (v) => setState(() => _cameraOn = v),
+            title: const Text('Kamera (Scan)'),
+            subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
+          ),
+          if (_cameraOn) ...[
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _manualBoardOrOffload(offload: false),
-                        icon: const Icon(Icons.check_circle),
-                        label: const Text('Manuel Boardlama'),
-                      ),
+                    MobileScanner(
+                      controller: _scannerController,
+                      onDetect: _onCameraDetect,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _manualBoardOrOffload(offload: true),
-                        icon: const Icon(Icons.cancel),
-                        label: const Text('Manuel Offload'),
+                    Align(
+                      alignment: Alignment.topRight,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Torch',
+                              style: IconButton.styleFrom(
+                                backgroundColor: Colors.black.withOpacity(0.35),
+                              ),
+                              onPressed: () async {
+                                await _scannerController.toggleTorch();
+                                setState(() {});
+                              },
+                              icon: Icon(
+                                _scannerController.torchState == TorchState.on ? Icons.flash_on : Icons.flash_off,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              tooltip: 'Kamera değiştir',
+                              style: IconButton.styleFrom(
+                                backgroundColor: Colors.black.withOpacity(0.35),
+                              ),
+                              onPressed: () async {
+                                await _scannerController.switchCamera();
+                                setState(() {});
+                              },
+                              icon: const Icon(Icons.cameraswitch, color: Colors.white),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _inviteUser,
-                  icon: const Icon(Icons.person_add_alt_1),
-                  label: const Text('Kullanıcı davet et'),
-                ),
-                const Divider(height: 24),
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    'Scan',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  '"Kamera ile Tara" ile biniş kartındaki barkod/QR okutabilir veya aşağıya manuel scan string girebilirsin.',
-                  style: TextStyle(fontSize: 12),
-                ),
-                const SizedBox(height: 12),
-                TextField(
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          if (_lastParsedPreview != null) ...[
+            Text(
+              _lastParsedPreview!,
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+          ],
+TextField(
                   controller: _manualScan,
                   decoration: const InputDecoration(
                     labelText: 'Manuel Scan (FLIGHTCODE|FULLNAME|SEAT|PNR)',
@@ -2029,12 +2165,75 @@ class _PaxListTabState extends State<PaxListTab> {
   }
 
   Future<bool> _isWatchlistMatch(String fullName) async {
-    final q = await widget.flightRef
-        .collection('watchlist')
-        .where('fullName', isEqualTo: fullName)
-        .limit(1)
-        .get();
-    return q.docs.isNotEmpty;
+    final scannedKeys = _nameKeyVariants(fullName);
+    if (scannedKeys.isEmpty) return false;
+
+    final snap = await widget.flightRef.collection('watchlist').limit(500).get();
+    for (final d in snap.docs) {
+      final data = d.data();
+      final wlName = (data['fullName'] ?? '').toString();
+      if (wlName.trim().isEmpty) continue;
+
+      // Prefer precomputed keys if present
+      final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
+      final wlKeys = <String>{};
+      if (stored != null) {
+        for (final v in stored) {
+          if (v is String && v.trim().isNotEmpty) wlKeys.add(v.trim().toUpperCase());
+        }
+      } else {
+        wlKeys.addAll(_nameKeyVariants(wlName));
+      }
+
+      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  Set<String> _nameKeyVariants(String s) {
+    var up = s.toUpperCase();
+
+    // Common titles / prefixes / suffixes found on boarding passes
+    const titles = [
+      'MR', 'MRS', 'MS', 'MISS', 'MSTR', 'MASTER',
+      'DR', 'PROF', 'SIR', 'MADAM',
+      'INF', 'INFT', 'INFANT', 'CHD', 'CHILD'
+    ];
+
+    // Replace separators with space, keep only A-Z0-9 and spaces
+    up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+    up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+    up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    if (up.isEmpty) return <String>{};
+
+    var tokens = up.split(' ').where((t) => t.isNotEmpty).toList();
+
+    // Strip titles from start/end (can repeat like "MR MR")
+    while (tokens.isNotEmpty && titles.contains(tokens.first)) tokens.removeAt(0);
+    while (tokens.isNotEmpty && titles.contains(tokens.last)) tokens.removeLast();
+
+    if (tokens.isEmpty) return <String>{};
+
+    final joined = tokens.join('');
+    final reversedJoined = tokens.reversed.join('');
+
+    final keys = <String>{};
+    keys.add(joined);
+    keys.add(reversedJoined);
+
+    // Also add bi-grams for robustness (e.g. LASTFIRSTMR glued)
+    if (tokens.length >= 2) {
+      keys.add(tokens[0] + tokens[1]);
+      keys.add(tokens[1] + tokens[0]);
+    }
+
+    // Add each token itself (handles single token watchlist entries)
+    for (final t in tokens) {
+      if (t.length >= 3) keys.add(t);
+    }
+
+    return keys;
   }
 
   Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
@@ -2135,6 +2334,35 @@ class WatchlistTab extends StatelessWidget {
 
   const WatchlistTab({super.key, required this.flightRef, required this.currentUid});
 
+  static List<String> _buildNameKeys(String s) {
+    var up = s.toUpperCase();
+    const titles = [
+      'MR', 'MRS', 'MS', 'MISS', 'MSTR', 'MASTER',
+      'DR', 'PROF', 'SIR', 'MADAM',
+      'INF', 'INFT', 'INFANT', 'CHD', 'CHILD'
+    ];
+    up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+    up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+    up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (up.isEmpty) return const [];
+    var tokens = up.split(' ').where((t) => t.isNotEmpty).toList();
+    while (tokens.isNotEmpty && titles.contains(tokens.first)) tokens.removeAt(0);
+    while (tokens.isNotEmpty && titles.contains(tokens.last)) tokens.removeLast();
+    if (tokens.isEmpty) return const [];
+    final keys = <String>{};
+    keys.add(tokens.join(''));
+    keys.add(tokens.reversed.join(''));
+    if (tokens.length >= 2) {
+      keys.add(tokens[0] + tokens[1]);
+      keys.add(tokens[1] + tokens[0]);
+    }
+    for (final t in tokens) {
+      if (t.length >= 3) keys.add(t);
+    }
+    return keys.toList();
+  }
+
+
   Future<String> _emailOf(String uid) async {
     final s = await Db.userDoc(uid).get();
     return (s.data()?['email'] ?? '').toString();
@@ -2170,6 +2398,7 @@ class WatchlistTab extends StatelessWidget {
 
     await flightRef.collection('watchlist').add({
       'fullName': name,
+      'nameKeys': WatchlistTab._buildNameKeys(name),
       'createdAt': FieldValue.serverTimestamp(),
     });
     await _log('WATCHLIST_ADD', meta: {'fullName': name});
