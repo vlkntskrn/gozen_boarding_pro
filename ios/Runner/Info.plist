@@ -66,5 +66,10 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+
+	<!-- CAMERA PERMISSION -->
+	<key>NSCameraUsageDescription</key>
+	<string>Boarding pass taramak için kamera gerekli.</string>
+
 </dict>
 </plist>
