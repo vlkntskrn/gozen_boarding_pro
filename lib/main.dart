@@ -1037,10 +1037,13 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
   String? _err;
 
 
-  bool _isValidFlightCode(String s) {
-    // Examples: LS976, BA2245
-    return RegExp(r'^[A-Z]{2}\d{3,4}$').hasMatch(s);
-  }
+bool _isValidFlightCode(String code) {
+  final c = code.trim().toUpperCase().replaceAll(RegExp(r'\s+'), '');
+  // Accept 2-letter (IATA) or 3-letter (ICAO) airline designator + 2-5 digit flight number (+ optional suffix letter).
+  // Examples: LS1730, LS0476, TOM857, BA2245, TK001, XQ856A
+  return RegExp(r'^[A-Z0-9]{2,3}\d{2,5}[A-Z]?$').hasMatch(c);
+}
+
 
   Future<void> _addWatchlistDialog() async {
     final c = TextEditingController();
@@ -1648,18 +1651,40 @@ class _ScanTabState extends State<ScanTab> {
 
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   // -------- Scan helpers --------
-  String _normalizeFlightCode(String code) {
-    final c = code
-        .toUpperCase()
-        .replaceAll(RegExp(r'[^A-Z0-9]'), '')
-        .trim();
-    final m = RegExp(r'^([A-Z0-9]{2,3})(0*[0-9]{1,6})$').firstMatch(c);
-    if (m == null) return c;
-    final carrier = m.group(1) ?? '';
-    var num = (m.group(2) ?? '').replaceFirst(RegExp(r'^0+'), '');
-    if (num.isEmpty) num = '0';
-    return '$carrier$num';
-  }
+String _normalizeFlightCode(String raw) {
+  // Canonical compare form:
+  // - uppercase
+  // - remove spaces and non-alnum
+  // - (optional) map known ICAO->IATA
+  // - remove leading zeros from numeric part
+  // - keep optional suffix letter (e.g., 1234A)
+  var s = raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  final m = RegExp(r'^([A-Z0-9]{2,3})(\d{1,6})([A-Z]?)$').firstMatch(s);
+  if (m == null) return s;
+
+  var air = m.group(1)!;
+  var num = m.group(2)!;
+  final suf = m.group(3)!;
+
+  // If airline is ICAO but expected is IATA, map to IATA (best-effort).
+  const icaoToIata = {
+    'TOM': 'BY',
+    'TUI': 'BY',
+    'BAW': 'BA',
+    'EFW': 'EW',
+    'EXS': 'LS',
+    'SXS': 'XQ',
+    'FHY': 'FH',
+    'TFL': 'OR',
+  };
+  air = icaoToIata[air] ?? air;
+
+  num = num.replaceFirst(RegExp(r'^0+'), '');
+  if (num.isEmpty) num = '0';
+
+  return '$air$num$suf';
+}
+
   String _normalizeName(String s) {
     var v = s.trim().toLowerCase();
 
@@ -1743,85 +1768,83 @@ class _ScanTabState extends State<ScanTab> {
     return out.where((e) => e.isNotEmpty).toSet();
   }
 
-  String _extractFlightCode(String input) {
-    // Supports:
-    // 1) Plain text like "LS0476", "BA 2245", "EXS 00476"
-    // 2) IATA BCBP (PDF417) fixed-width format starting with "M1"
-    //
-    // Returns canonical flight code: <carrier><flightNo>, with flightNo stripped of leading zeros.
-    final raw = input
-        .toUpperCase()
-        // Remove common control chars (GS=29, RS=30, US=31, etc.)
-        .replaceAll(RegExp(r'[\x00-\x1F]'), ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+String _extractFlightCode(String raw) {
+  // Try to extract flight designator from as many boarding-card encodings as possible.
+  // Strategy:
+  //  1) Try IATA BCBP fixed-position parse (works for most PDF417/QR BCBP payloads)
+  //  2) Token-based regex around FLIGHT/FLT/UÇUŞ
+  //  3) Generic best-candidate regex scan
+  //
+  // Returned value is NOT validated; caller compares via _normalizeFlightCode().
 
-    String canon(String carrier, String flightNo) {
-      final c = carrier.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-      var n = flightNo.replaceAll(RegExp(r'[^0-9]'), '');
-      n = n.replaceFirst(RegExp(r'^0+'), '');
-      if (n.isEmpty) n = '0';
-      return '$c$n';
+  String cleaned = raw.toUpperCase();
+
+  // Keep printable chars; normalize separators.
+  cleaned = cleaned.replaceAll(RegExp(r'[\u0000-\u001F]'), ' ');
+  cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  // ---- 1) BCBP fixed positions ----
+  // BCBP usually starts with 'M' (mobile) or 'S' and contains at least 60 chars for one leg.
+  // Airline (3) + Flight number (5) is typically at positions [36..40) and [39..44).
+  for (final start in [0, cleaned.indexOf('M'), cleaned.indexOf('S')]) {
+    if (start == -1) continue;
+    final line = cleaned.substring(start);
+    if (line.length < 45) continue;
+    final air = line.substring(36, 39).replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final num = line.substring(39, 44).replaceAll(RegExp(r'[^0-9]'), '');
+    if (air.length == 3 && num.length >= 3) {
+      final cand = '$air$num';
+      return cand;
     }
-
-    // ICAO->IATA mapping for common airlines seen on boarding passes.
-    // (BCBP uses a 3-char "operating carrier designator"; ops usually use 2-char IATA.)
-    const icaoToIata = <String, String>{
-      'EXS': 'LS', // Jet2
-      'BAW': 'BA', // British Airways
-      'TOM': 'BY', // TUI Airways
-      'TFL': 'OR', // TUI fly Netherlands
-      'FHY': 'FH', // Freebird
-      // Add more as you encounter them.
-    };
-
-    // ---- 1) BCBP fixed position parse (best signal) ----
-    // Minimal BCBP length is ~60+ chars. We look for segment starting with M1/M2.
-    final bcbpIdx = raw.indexOf(RegExp(r'\bM[0-9]'));
-    if (bcbpIdx >= 0 && raw.length >= bcbpIdx + 45) {
-      // Layout (IATA BCBP):
-      // 2: format code (M1)
-      // 20: passenger name
-      // 1: electronic ticket indicator
-      // 7: PNR
-      // 3+3: from/to
-      // 3: operating carrier designator
-      // 5: flight number (right aligned, can include spaces/zeros)
-      try {
-        final carrier3 = raw.substring(bcbpIdx + 36, bcbpIdx + 39).trim();
-        final flight5 = raw.substring(bcbpIdx + 39, bcbpIdx + 44).trim();
-        if (carrier3.isNotEmpty && flight5.isNotEmpty) {
-          final mapped = icaoToIata[carrier3] ?? carrier3;
-          return canon(mapped, flight5);
-        }
-      } catch (_) {
-        // fall through
-      }
-    }
-
-    // ---- 2) Generic regex extraction (handles lots of vendor variations) ----
-    // Prefer patterns with 2-3 letters then 1-5 digits.
-    final m = RegExp(r'\b([A-Z0-9]{2,3})\s*0*([0-9]{1,5})\b').firstMatch(raw);
-    if (m != null) {
-      final carrier = m.group(1) ?? '';
-      final number = m.group(2) ?? '';
-      final mapped = carrier.length == 3 ? (icaoToIata[carrier] ?? carrier) : carrier;
-      return canon(mapped, number);
-    }
-
-    // ---- 3) Last resort: scan for any digit-run that looks like a flight number near a carrier ----
-    // Some decoders remove separators; try sliding window.
-    final all = RegExp(r'([A-Z]{2,3})([0-9]{2,6})').allMatches(raw).toList();
-    if (all.isNotEmpty) {
-      final mm = all.first;
-      final carrier = mm.group(1) ?? '';
-      final number = mm.group(2) ?? '';
-      final mapped = carrier.length == 3 ? (icaoToIata[carrier] ?? carrier) : carrier;
-      return canon(mapped, number);
-    }
-
-    throw Exception('Boarding kart içinden uçuş kodu okunamadı');
   }
+
+  // ---- 2) Token-based patterns ----
+  // Examples: "FLIGHT LS1730", "FLT: TOM 857", "UÇUŞ XQ 856"
+  final tokenRe = RegExp(
+    r'(?:\bFLIGHT\b|\bFLT\b|\bU\s*Ç\s*U\s*Ş\b|\bUCUS\b)\s*[:#-]?\s*([A-Z0-9]{2,3})\s*0*([0-9]{2,5})([A-Z]?)',
+    caseSensitive: false,
+  );
+  final mt = tokenRe.firstMatch(cleaned);
+  if (mt != null) {
+    final air = mt.group(1)!.toUpperCase();
+    final num = mt.group(2)!;
+    final suf = mt.group(3) ?? '';
+    return '$air$num$suf';
+  }
+
+  // ---- 3) Generic scan ----
+  // Find all plausible candidates and pick the best-scoring one.
+  final candRe = RegExp(r'\b([A-Z0-9]{2,3})\s*0*([0-9]{2,5})([A-Z]?)\b');
+  final candidates = <String>[];
+  for (final m in candRe.allMatches(cleaned)) {
+    final air = m.group(1)!;
+    final num = m.group(2)!;
+    final suf = m.group(3) ?? '';
+    // filter out common false-positives like seat numbers (e.g., 12A) by requiring airline part length >=2 and num>=2 digits (already)
+    candidates.add('$air$num$suf');
+  }
+  if (candidates.isEmpty) return '';
+
+  // Prefer candidates that start with letters (not digits) and have 2-3 letters.
+  int score(String c) {
+    final m = RegExp(r'^([A-Z0-9]{2,3})(\d{2,5})([A-Z]?)$').firstMatch(c);
+    if (m == null) return 0;
+    final air = m.group(1)!;
+    final num = m.group(2)!;
+    var s = 0;
+    if (RegExp(r'^[A-Z]{2,3}$').hasMatch(air)) s += 5;
+    if (air.length == 2) s += 2;
+    if (air.length == 3) s += 1;
+    if (num.length == 4) s += 2;
+    if (num.length == 3) s += 1;
+    if (c.contains('0')) s += 0; // neutral
+    return s;
+  }
+
+  candidates.sort((a, b) => score(b).compareTo(score(a)));
+  return candidates.first;
+}
+
 
 
   String _extractSeat(String raw) {
