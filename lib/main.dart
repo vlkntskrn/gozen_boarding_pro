@@ -794,7 +794,8 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
 
   bool _isValidFlightCode(String v) {
     // Examples: LS976, BA2245
-    final re = RegExp(r'^[A-Z]{2}\d{3,4}$');
+    // Examples: LS976, BA2245, TOM857, XQ0688
+    final re = RegExp(r'^[A-Z]{2,3}\d{1,4}$');
     return re.hasMatch(v.toUpperCase());
   }
 
@@ -867,7 +868,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     });
 
     try {
-      final code = _flightCode.text.trim().toUpperCase();
+      final code = _flightCode.text.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
       if (!_isValidFlightCode(code)) {
         throw Exception('Uçuş kodu formatı hatalı. Örn: LS976 / BA2245');
       }
@@ -1205,20 +1206,7 @@ class _ScanTabState extends State<ScanTab> {
     'SXS': 'XQ',
     // Freebird Airlines
     'FHY': 'FH',
-      'WUK': 'W9',
-    'WZZ': 'W6',
-    'WMT': 'W4',
-    'THY': 'TK',
-    'EWG': 'EW',
-    'PGT': 'PC',
-    'TKJ': 'VF',
-    'DLH': 'LH',
-    'AUA': 'OS',
-    'LOT': 'LO',
-    'ACA': 'AC',
-    'TSC': 'TS',
-    'TWI': 'TI',
-};
+  };
 
   static const Map<String, String> _iataToIcao = {
     'LS': 'EXS',
@@ -1228,20 +1216,8 @@ class _ScanTabState extends State<ScanTab> {
     'BY': 'TOM',
     'XQ': 'SXS',
     'FH': 'FHY',
-      'W9': 'WUK',
-    'W6': 'WZZ',
-    'W4': 'WMT',
-    'TK': 'THY',
-    'EW': 'EWG',
-    'PC': 'PGT',
-    'VF': 'TKJ',
-    'LH': 'DLH',
-    'OS': 'AUA',
-    'LO': 'LOT',
-    'AC': 'ACA',
-    'TS': 'TSC',
-    'TI': 'TWI',
-};
+    'TI': 'TWI', // Tailwind Airlines
+  };
 
   String _normalizeFlightCode(String input) {
     final s = input.trim().toUpperCase();
@@ -1318,79 +1294,34 @@ class _ScanTabState extends State<ScanTab> {
       }
     }
 
-    // 2) IATA BCBP (PDF417/QR payload) – robust parse (supports 2- or 3-char carrier field)
+    // 2) IATA BCBP (PDF417/QR payload) – minimal fixed-position parse
     // We only need: passenger name, flight designator, seat, PNR.
-    // Fixed field order (1st leg):
-    //  1 format, 1 legs, 20 name, 1 e-ticket, 7 PNR, 3 from, 3 to,
-    //  2/3 carrier, 5 flight, 3 julian date, 1 cabin, 4 seat, 5 seq, 1 status
-    if (up.startsWith('M') && up.length >= 60) {
+    // Reference layout: 1(format) + 1(legs) + 20(name) + 1(ETKT) + 7(PNR) ... then per-leg fields.
+    final up = r.toUpperCase();
+    if (up.length >= 52 && (up.startsWith('M') || up.startsWith('S'))) {
       try {
-        final nameField = up.substring(2, 22).trim();
-        final pnr = up.length >= 30 ? up.substring(23, 30).trim() : '';
-        final from = up.length >= 33 ? up.substring(30, 33).trim() : '';
-        final to = up.length >= 36 ? up.substring(33, 36).trim() : '';
+        final name = up.substring(2, 22).trim();
+        final pnr = up.substring(23, 30).trim();
 
-        // Everything after FROM/TO starts at index 36 (0-based).
-        final rest = up.length > 36 ? up.substring(36) : '';
+        final carrier3 = up.substring(36, 39).trim();
+        final flight5 = up.substring(39, 44).trim(); // often 5 incl leading zeros
+        final seat4 = up.substring(48, 52).trim();
 
-        // Carrier can be 3 chars (ICAO or IATA+space) OR 2 chars (IATA) – detect by looking at the 3rd char.
-        int carrierLen = 3;
-        if (rest.length >= 3) {
-          final c0 = rest[0];
-          final c1 = rest[1];
-          final c2 = rest[2];
-          final twoLetters = RegExp(r'^[A-Z0-9]{2}$').hasMatch('$c0$c1');
-          final thirdIsDigit = RegExp(r'^[0-9]$').hasMatch(c2);
-          final thirdIsSpace = c2 == ' ';
-          if (twoLetters && (thirdIsDigit || thirdIsSpace)) {
-            carrierLen = 2;
-          }
-        }
+        final flightNum = flight5.replaceFirst(RegExp(r'^0+'), '');
+        final seatNorm = seat4.replaceAll(' ', '').replaceFirst(RegExp(r'^0+'), '').replaceAll('-', '');
 
-        final carrierRaw = rest.length >= carrierLen ? rest.substring(0, carrierLen).trim() : '';
-        final flightRaw = rest.length >= carrierLen + 5 ? rest.substring(carrierLen, carrierLen + 5).trim() : '';
+        // Prefer IATA if mapping exists, but keep ICAO tolerant matching anyway.
+        final carrier2 = _icaoToIata[carrier3] ?? carrier3;
 
-        // Seat starts after carrier + flight(5) + julian(3) + cabin(1)
-        final seatStart = carrierLen + 5 + 3 + 1;
-        final seatRaw = rest.length >= seatStart + 4 ? rest.substring(seatStart, seatStart + 4) : '';
-
-        // Normalize carrier: if 3-char ICAO -> map to IATA; if 3-char but IATA+space -> trim.
-        String carrier2 = carrierRaw;
-        if (carrier2.length == 3) {
-          carrier2 = carrier2.trim();
-          if (carrier2.length == 3) {
-            carrier2 = _icaoToIata[carrier2] ?? carrier2;
-          }
-          carrier2 = carrier2.replaceAll(' ', '');
-          if (carrier2.length > 2) {
-            carrier2 = carrier2.substring(0, 2);
-          }
-        }
-
-        // Normalize flight number: strip non-digits, then drop leading zeros.
-        final digits = flightRaw.replaceAll(RegExp(r'[^0-9]'), '');
-        final flightNum = digits.replaceFirst(RegExp(r'^0+'), '');
-        final flightNumNorm = flightNum.isEmpty ? digits : flightNum;
-
-        // Normalize seat: remove spaces/zeros at left (e.g. 032F -> 32F)
-        var seatNorm = seatRaw.replaceAll(' ', '');
-        seatNorm = seatNorm.replaceFirst(RegExp(r'^0+'), '');
-
-        final flightCode = _normalizeFlightCode('$carrier2$flightNumNorm');
-
-        if (flightCode.isNotEmpty) {
-          return {
-            'type': 'bcbp',
-            'flightCode': flightCode,
-            'passengerName': nameField,
-            'seat': seatNorm,
-            'pnr': pnr,
-            'from': from,
-            'to': to,
-          };
-        }
+        return {
+          'flightCode': '$carrier2$flightNum',
+          'fullName': name,
+          'seat': seatNorm,
+          'pnr': pnr,
+          'flightCodeRaw': '$carrier3$flightNum', // helpful for diagnostics
+        };
       } catch (_) {
-        // fallthrough
+        // fall through
       }
     }
 
