@@ -1403,18 +1403,71 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
               length: 7,
               child: Scaffold(
                 appBar: AppBar(
-                  title: Text('Uçuş: $code'),
-                  bottom: const TabBar(
-                    isScrollable: true,
-                    tabs: [
-                      Tab(text: 'Scan'),
-                      Tab(text: 'Yolcu Listesi'),
-                      Tab(text: 'WatchList'),
-                      Tab(text: 'Personel'),
-                      Tab(text: 'Ekipman'),
-                      Tab(text: 'Op. Times'),
-                      Tab(text: 'Rapor'),
+                  toolbarHeight: 86,
+                  titleSpacing: 12,
+                  title: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        'GOZEN BOARDING PRO',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Uçuş • $code',
+                        style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                      ),
                     ],
+                  ),
+                  actions: const [
+                    Padding(
+                      padding: EdgeInsets.only(right: 12),
+                      child: Center(child: _FlightBadge(icon: Icons.verified_user_rounded, text: 'Crew Ops')),
+                    ),
+                  ],
+                  bottom: PreferredSize(
+                    preferredSize: const Size.fromHeight(58),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                      child: Container(
+                        height: 46,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          color: Theme.of(context).brightness == Brightness.dark
+                              ? Colors.white.withOpacity(0.05)
+                              : Colors.white.withOpacity(0.82),
+                          border: Border.all(
+                            color: Theme.of(context).brightness == Brightness.dark
+                                ? Colors.white.withOpacity(0.10)
+                                : Colors.white.withOpacity(0.90),
+                          ),
+                        ),
+                        child: const TabBar(
+                          isScrollable: true,
+                          dividerColor: Colors.transparent,
+                          tabAlignment: TabAlignment.start,
+                          indicatorSize: TabBarIndicatorSize.tab,
+                          indicator: BoxDecoration(
+                            borderRadius: BorderRadius.all(Radius.circular(12)),
+                            gradient: LinearGradient(
+                              colors: [_AppPalette.cyan, Color(0xFF8BE6FF)],
+                            ),
+                          ),
+                          labelColor: _AppPalette.midnight,
+                          labelStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                          tabs: [
+                            Tab(text: 'Scan'),
+                            Tab(text: 'Yolcu Listesi'),
+                            Tab(text: 'WatchList'),
+                            Tab(text: 'Personel'),
+                            Tab(text: 'Ekipman'),
+                            Tab(text: 'Op. Times'),
+                            Tab(text: 'Rapor'),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
                 ),
                 body: TabBarView(
@@ -1441,6 +1494,36 @@ class _Access {
   final bool allowed;
   final String? reason;
   _Access({required this.allowed, required this.reason});
+}
+
+
+class _FlightBadge extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _FlightBadge({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: (dark ? Colors.white : _AppPalette.navy).withOpacity(dark ? 0.06 : 0.05),
+        border: Border.all(
+          color: (dark ? Colors.white : _AppPalette.navy).withOpacity(0.10),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: dark ? _AppPalette.cyan : _AppPalette.navy),
+          const SizedBox(width: 6),
+          Text(text, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+        ],
+      ),
+    );
+  }
 }
 
 // ==========================
@@ -2606,12 +2689,49 @@ class _Section extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ExpansionTile(
-      initiallyExpanded: title != 'Diğer',
-      title: Text('$title ($count)'),
-      children: children.isEmpty
-          ? [const Padding(padding: EdgeInsets.all(12), child: Text('Boş.'))]
-          : children,
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: dark ? Colors.white.withOpacity(0.03) : Colors.white.withOpacity(0.75),
+        border: Border.all(
+          color: dark ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.05),
+        ),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+          childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+          initiallyExpanded: title != 'Diğer',
+          leading: Icon(
+            Icons.groups_2_rounded,
+            color: dark ? _AppPalette.cyan : _AppPalette.navy,
+          ),
+          title: Row(
+            children: [
+              Expanded(
+                child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: (dark ? _AppPalette.cyan : _AppPalette.navy).withOpacity(0.10),
+                ),
+                child: Text(
+                  '$count',
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          children: children.isEmpty
+              ? const [Padding(padding: EdgeInsets.all(12), child: Text('Boş.'))]
+              : children,
+        ),
+      ),
     );
   }
 }
