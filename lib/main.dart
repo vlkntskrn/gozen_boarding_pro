@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -1204,7 +1205,20 @@ class _ScanTabState extends State<ScanTab> {
     'SXS': 'XQ',
     // Freebird Airlines
     'FHY': 'FH',
-  };
+      'WUK': 'W9',
+    'WZZ': 'W6',
+    'WMT': 'W4',
+    'THY': 'TK',
+    'EWG': 'EW',
+    'PGT': 'PC',
+    'TKJ': 'VF',
+    'DLH': 'LH',
+    'AUA': 'OS',
+    'LOT': 'LO',
+    'ACA': 'AC',
+    'TSC': 'TS',
+    'TWI': 'TI',
+};
 
   static const Map<String, String> _iataToIcao = {
     'LS': 'EXS',
@@ -1214,7 +1228,20 @@ class _ScanTabState extends State<ScanTab> {
     'BY': 'TOM',
     'XQ': 'SXS',
     'FH': 'FHY',
-  };
+      'W9': 'WUK',
+    'W6': 'WZZ',
+    'W4': 'WMT',
+    'TK': 'THY',
+    'EW': 'EWG',
+    'PC': 'PGT',
+    'VF': 'TKJ',
+    'LH': 'DLH',
+    'OS': 'AUA',
+    'LO': 'LOT',
+    'AC': 'ACA',
+    'TS': 'TSC',
+    'TI': 'TWI',
+};
 
   String _normalizeFlightCode(String input) {
     final s = input.trim().toUpperCase();
@@ -1246,24 +1273,27 @@ class _ScanTabState extends State<ScanTab> {
 
     final out = <String>{n};
 
+    // Many printed boarding passes show booking class right after the flight number (e.g. "LS 1850 Y").
+    // Treat trailing single letter as optional by adding a no-suffix variant.
+    if (suf.isNotEmpty) {
+      out.add('$pref$num');
+    }
+
     // If given as ICAO (3), add IATA alt.
     if (pref.length == 3 && _icaoToIata.containsKey(pref)) {
       out.add('${_icaoToIata[pref]}$num$suf');
+      if (suf.isNotEmpty) out.add('${_icaoToIata[pref]}$num');
     }
 
     // If given as IATA, add ICAO alt.
     if (_iataToIcao.containsKey(pref)) {
       out.add('${_iataToIcao[pref]}$num$suf');
+      if (suf.isNotEmpty) out.add('${_iataToIcao[pref]}$num');
     }
-
-    // Also accept with zero-padded 5-digit flight (common in BCBP).
-    final num5 = num.padLeft(5, '0');
-    out.add('$pref$num5$suf');
-    if (_iataToIcao.containsKey(pref)) out.add('${_iataToIcao[pref]}$num5$suf');
-    if (pref.length == 3 && _icaoToIata.containsKey(pref)) out.add('${_icaoToIata[pref]}$num5$suf');
 
     return out;
   }
+
 
   bool _flightCodeMatches(String expected, String scanned) {
     final a = _flightCodeAlternatives(expected);
@@ -1288,34 +1318,79 @@ class _ScanTabState extends State<ScanTab> {
       }
     }
 
-    // 2) IATA BCBP (PDF417/QR payload) – minimal fixed-position parse
+    // 2) IATA BCBP (PDF417/QR payload) – robust parse (supports 2- or 3-char carrier field)
     // We only need: passenger name, flight designator, seat, PNR.
-    // Reference layout: 1(format) + 1(legs) + 20(name) + 1(ETKT) + 7(PNR) ... then per-leg fields.
-    final up = r.toUpperCase();
-    if (up.length >= 52 && (up.startsWith('M') || up.startsWith('S'))) {
+    // Fixed field order (1st leg):
+    //  1 format, 1 legs, 20 name, 1 e-ticket, 7 PNR, 3 from, 3 to,
+    //  2/3 carrier, 5 flight, 3 julian date, 1 cabin, 4 seat, 5 seq, 1 status
+    if (up.startsWith('M') && up.length >= 60) {
       try {
-        final name = up.substring(2, 22).trim();
-        final pnr = up.substring(23, 30).trim();
+        final nameField = up.substring(2, 22).trim();
+        final pnr = up.length >= 30 ? up.substring(23, 30).trim() : '';
+        final from = up.length >= 33 ? up.substring(30, 33).trim() : '';
+        final to = up.length >= 36 ? up.substring(33, 36).trim() : '';
 
-        final carrier3 = up.substring(36, 39).trim();
-        final flight5 = up.substring(39, 44).trim(); // often 5 incl leading zeros
-        final seat4 = up.substring(48, 52).trim();
+        // Everything after FROM/TO starts at index 36 (0-based).
+        final rest = up.length > 36 ? up.substring(36) : '';
 
-        final flightNum = flight5.replaceFirst(RegExp(r'^0+'), '');
-        final seatNorm = seat4.replaceAll(' ', '').replaceFirst(RegExp(r'^0+'), '').replaceAll('-', '');
+        // Carrier can be 3 chars (ICAO or IATA+space) OR 2 chars (IATA) – detect by looking at the 3rd char.
+        int carrierLen = 3;
+        if (rest.length >= 3) {
+          final c0 = rest[0];
+          final c1 = rest[1];
+          final c2 = rest[2];
+          final twoLetters = RegExp(r'^[A-Z0-9]{2}$').hasMatch('$c0$c1');
+          final thirdIsDigit = RegExp(r'^[0-9]$').hasMatch(c2);
+          final thirdIsSpace = c2 == ' ';
+          if (twoLetters && (thirdIsDigit || thirdIsSpace)) {
+            carrierLen = 2;
+          }
+        }
 
-        // Prefer IATA if mapping exists, but keep ICAO tolerant matching anyway.
-        final carrier2 = _icaoToIata[carrier3] ?? carrier3;
+        final carrierRaw = rest.length >= carrierLen ? rest.substring(0, carrierLen).trim() : '';
+        final flightRaw = rest.length >= carrierLen + 5 ? rest.substring(carrierLen, carrierLen + 5).trim() : '';
 
-        return {
-          'flightCode': '$carrier2$flightNum',
-          'fullName': name,
-          'seat': seatNorm,
-          'pnr': pnr,
-          'flightCodeRaw': '$carrier3$flightNum', // helpful for diagnostics
-        };
+        // Seat starts after carrier + flight(5) + julian(3) + cabin(1)
+        final seatStart = carrierLen + 5 + 3 + 1;
+        final seatRaw = rest.length >= seatStart + 4 ? rest.substring(seatStart, seatStart + 4) : '';
+
+        // Normalize carrier: if 3-char ICAO -> map to IATA; if 3-char but IATA+space -> trim.
+        String carrier2 = carrierRaw;
+        if (carrier2.length == 3) {
+          carrier2 = carrier2.trim();
+          if (carrier2.length == 3) {
+            carrier2 = _icaoToIata[carrier2] ?? carrier2;
+          }
+          carrier2 = carrier2.replaceAll(' ', '');
+          if (carrier2.length > 2) {
+            carrier2 = carrier2.substring(0, 2);
+          }
+        }
+
+        // Normalize flight number: strip non-digits, then drop leading zeros.
+        final digits = flightRaw.replaceAll(RegExp(r'[^0-9]'), '');
+        final flightNum = digits.replaceFirst(RegExp(r'^0+'), '');
+        final flightNumNorm = flightNum.isEmpty ? digits : flightNum;
+
+        // Normalize seat: remove spaces/zeros at left (e.g. 032F -> 32F)
+        var seatNorm = seatRaw.replaceAll(' ', '');
+        seatNorm = seatNorm.replaceFirst(RegExp(r'^0+'), '');
+
+        final flightCode = _normalizeFlightCode('$carrier2$flightNumNorm');
+
+        if (flightCode.isNotEmpty) {
+          return {
+            'type': 'bcbp',
+            'flightCode': flightCode,
+            'passengerName': nameField,
+            'seat': seatNorm,
+            'pnr': pnr,
+            'from': from,
+            'to': to,
+          };
+        }
       } catch (_) {
-        // fall through
+        // fallthrough
       }
     }
 
@@ -1330,13 +1405,52 @@ class _ScanTabState extends State<ScanTab> {
     };
   }
 
-  String _extractFlightCodeLoose(String text) {
-    final up = text.toUpperCase();
-    // Match patterns like "LS 1850", "BA679", "TOM 836", "XQ0688"
-    final m = RegExp(r'\b([A-Z0-9]{1,3})\s*0*([0-9]{1,5})\s*([A-Z]?)\b').firstMatch(up);
-    if (m == null) return '';
-    return _normalizeFlightCode('${m.group(1)}${m.group(2)}${m.group(3) ?? ''}');
+  String _extractFlightCodeLoose(String raw) {
+    // Look for things like:
+    //  - "LS 1850"
+    //  - "BA679"
+    //  - "X3 117"
+    // We intentionally ignore the booking class letter that is often printed after the number.
+    final up = raw.toUpperCase();
+
+    // 1) Prefer explicit airline-code + flight-number patterns.
+    final re1 = RegExp(r'\\b([A-Z0-9]{1,3})\\s*0*([0-9]{1,5})\\b');
+    final matches = re1.allMatches(up).toList();
+
+    // Heuristic: prefer known airline codes (IATA or ICAO) and typical flight-number length.
+    String best = '';
+    int bestScore = -1;
+
+    for (final m in matches) {
+      final code = (m.group(1) ?? '').trim();
+      final num = (m.group(2) ?? '').trim();
+      if (code.isEmpty || num.isEmpty) continue;
+
+      final candidate = '$code$num';
+      final n = _normalizeFlightCode(candidate);
+
+      int score = 0;
+      if (_iataToIcao.containsKey(code) || _icaoToIata.containsKey(code)) score += 5;
+      if (num.length >= 2 && num.length <= 4) score += 2;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = n;
+      }
+    }
+
+    if (best.isNotEmpty) return best;
+
+    // 2) Fallback: any merged alnum chunk that looks like prefix+digits.
+    final cleaned = up.replaceAll(RegExp(r'[^A-Z0-9]'), ' ');
+    final tokens = cleaned.split(RegExp(r'\\s+')).where((t) => t.isNotEmpty).toList();
+    for (final t in tokens) {
+      final n = _normalizeFlightCode(t);
+      if (RegExp(r'^[A-Z0-9]{1,3}[0-9]{1,5}[A-Z]?$').hasMatch(n)) return n;
+    }
+    return '';
   }
+
 
   String _extractSeatLoose(String text) {
     final up = text.toUpperCase();
@@ -2748,17 +2862,7 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
   @override
   void initState() {
     super.initState();
-    _controller = MobileScannerController(
-      // We want 1 clean read; mobile_scanner will manage camera/permission prompts.
-      detectionSpeed: DetectionSpeed.normal,
-      formats: const [
-        BarcodeFormat.qrCode,
-        BarcodeFormat.aztec,
-        BarcodeFormat.pdf417,
-        BarcodeFormat.dataMatrix,
-        BarcodeFormat.code128,
-      ],
-    );
+    _controller = MobileScannerController();
   }
 
   @override
