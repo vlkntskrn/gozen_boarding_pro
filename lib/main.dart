@@ -17,30 +17,119 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 
 import 'package:flutter/material.dart';
 
 import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+
+// -----------------------------
+// Flight code helpers (IATA/ICAO tolerant)
+// -----------------------------
+
+class _FlightCodeParts {
+  final String designator; // IATA (2-char) or ICAO (3-char) or alnum (e.g. X3)
+  final String number; // digits
+  const _FlightCodeParts(this.designator, this.number);
+}
+
+// Common ICAO <-> IATA mappings we must accept interchangeably when matching.
+// (Not exhaustive; add as you meet new carriers.)
+const Map<String, String> _icaoToIata = {
+  'EXS': 'LS', // Jet2
+  'TOM': 'BY', // TUI Airways
+  'TFL': 'OR', // TUI fly Netherlands
+  'SXS': 'XQ', // SunExpress
+  'PGT': 'PC', // Pegasus
+  'BAW': 'BA', // British Airways
+  'FHY': 'FH', // Freebird
+};
+
+final Map<String, String> _iataToIcao = {
+  for (final e in _icaoToIata.entries) e.value: e.key,
+};
+
+String _normalizeFlightCode(String raw) {
+  final s = raw.trim().toUpperCase();
+  // Keep only A-Z and 0-9.
+  return s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+}
+
+_FlightCodeParts? _splitFlightCode(String raw) {
+  final s = _normalizeFlightCode(raw);
+  final m = RegExp(r'^([A-Z0-9]{2,3})([0-9]{1,4})$').firstMatch(s);
+  if (m == null) return null;
+  final designator = m.group(1)!;
+  var number = m.group(2)!;
+  // Normalize leading zeros: 0057 -> 57 (keeps at least 1 digit)
+  number = number.replaceFirst(RegExp(r'^0+(?=[0-9])'), '');
+  return _FlightCodeParts(designator, number);
+}
+
+bool _flightCodesEquivalent(String a, String b) {
+  final pa = _splitFlightCode(a);
+  final pb = _splitFlightCode(b);
+  if (pa == null || pb == null) return false;
+  if (pa.number != pb.number) return false;
+
+  if (pa.designator == pb.designator) return true;
+
+  // Accept ICAO<->IATA equivalence.
+  final aAsIata = _icaoToIata[pa.designator] ?? pa.designator;
+  final bAsIata = _icaoToIata[pb.designator] ?? pb.designator;
+  if (aAsIata == bAsIata) return true;
+
+  // Also accept reverse direction explicitly.
+  final aAsIcao = _iataToIcao[pa.designator] ?? pa.designator;
+  final bAsIcao = _iataToIcao[pb.designator] ?? pb.designator;
+  return aAsIcao == bAsIcao;
+}
+
+String? _extractFlightCodeFromScanPayload(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return null;
+
+  // 1) Legacy pipe format: ...|FLIGHT=LS1850|...
+  if (s.contains('|')) {
+    final parts = s.split('|');
+    for (final p in parts) {
+      final kv = p.split('=');
+      if (kv.length == 2 && kv[0].trim().toUpperCase() == 'FLIGHT') {
+        final candidate = kv[1].trim();
+        if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
+      }
+    }
+  }
+
+  // 2) IATA BCBP (PDF417/Aztec/QR) payload often starts with 'M' and is fixed-width.
+  //    Carrier field length is 3 (often 'LS '), flight number is 4.
+  final bcbp = s.replaceAll('\n', '').replaceAll('\r', '');
+  if (RegExp(r'^[Mm]').hasMatch(bcbp) && bcbp.length >= 42) {
+    // 0-based indices derived from IATA BCBP fixed field positions.
+    final carrier = bcbp.substring(35, 38).trim();
+    final fno = bcbp.substring(38, 42).trim();
+    final candidate = '$carrier$fno';
+    if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
+  }
+
+  // 3) Loose regex fallback (OCR text etc.)
+  final m = RegExp(r'([A-Z0-9]{2,3})[ ]*([0-9]{1,4})', caseSensitive: false).firstMatch(s);
+  if (m != null) {
+    final candidate = '${m.group(1)!}${m.group(2)!}';
+    if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
+  }
+  return null;
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-
-  // Force login prompt each app start (no session persistence)
-  await FirebaseAuth.instance.signOut();
-runApp(const GozenBoardingApp());
+  await Firebase.initializeApp();
+  runApp(const GozenBoardingApp());
 }
 
 class GozenBoardingApp extends StatefulWidget {
@@ -58,8 +147,6 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
   }
 
   @override
-
-
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'GOZEN BOARDING PRO',
@@ -165,10 +252,6 @@ class Db {
   static CollectionReference<Map<String, dynamic>> flights() =>
       fs.collection('flights');
 
-  static CollectionReference<Map<String, dynamic>> users() {
-    return FirebaseFirestore.instance.collection('users');
-  }
-
   static DocumentReference<Map<String, dynamic>> userDoc(String uid) =>
       fs.collection('users').doc(uid);
 
@@ -176,60 +259,6 @@ class Db {
       fs.collection('invites');
 }
 
-
-// ---------------- Offline Queue ----------------
-// Stores operations locally (SharedPreferences) while offline mode is ON,
-// and flushes them sequentially when offline mode is turned OFF.
-class OfflineQueue {
-  OfflineQueue(this.flightId);
-
-  final String flightId;
-
-  String get _key => 'offlineQueue_v1_$flightId';
-
-  Future<List<Map<String, dynamic>>> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
-    if (raw == null || raw.trim().isEmpty) return <Map<String, dynamic>>[];
-    try {
-      final list = (jsonDecode(raw) as List).cast<dynamic>();
-      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-    } catch (_) {
-      // Corrupt queue -> reset
-      await prefs.remove(_key);
-      return <Map<String, dynamic>>[];
-    }
-  }
-
-  Future<void> _save(List<Map<String, dynamic>> ops) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(ops));
-  }
-
-  Future<void> enqueue(Map<String, dynamic> op) async {
-    final ops = await load();
-    ops.add(op);
-    await _save(ops);
-  }
-
-  Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
-  }
-
-  Future<int> count() async {
-    final ops = await load();
-    return ops.length;
-  }
-
-  // Removes the first element (FIFO) after successful apply.
-  Future<void> popFirst() async {
-    final ops = await load();
-    if (ops.isEmpty) return;
-    ops.removeAt(0);
-    await _save(ops);
-  }
-}
 // ==========================
 // Login
 // ==========================
@@ -293,20 +322,12 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!snap.exists) {
         await ref.set({
           'email': email,
-          'displayName': (email.contains('@') ? email.split('@').first : email),
-          'usernameLower': (email.contains('@') ? email.split('@').first : email).toLowerCase(),
           'role': 'Agent', // Agent or Supervisor
           'createdAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
         });
       } else {
         // Ensure email updated
-        await ref.set({
-          'email': email,
-          'updatedAt': FieldValue.serverTimestamp(),
-          'displayName': (email.contains('@') ? email.split('@').first : email),
-          'usernameLower': (email.contains('@') ? email.split('@').first : email).toLowerCase(),
-          }, SetOptions(merge: true));
+        await ref.set({'email': email}, SetOptions(merge: true));
       }
     } catch (e) {
       setState(() => _err = e.toString());
@@ -315,6 +336,12 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  @override
+  void dispose() {
+    _email.dispose();
+    _pass.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -441,31 +468,6 @@ class _HomeScreenState extends State<HomeScreen> {
           appBar: AppBar(
             title: const Text('Uçuşlar'),
             actions: [
-          IconButton(
-            tooltip: 'Kullanıcı Adı',
-            icon: const Icon(Icons.qr_code_2),
-            onPressed: () async {
-              final u = FirebaseAuth.instance.currentUser;
-              if (u == null) return;
-              final doc = await Db.userDoc(u.uid).get();
-              final code = (doc.data()?['usernameLower'] ?? '').toString();
-              if (!context.mounted) return;
-              showDialog(
-                context: context,
-                builder: (_) => AlertDialog(
-                  title: const Text('Kullanıcı Adın'),
-                  content: SelectableText(
-                    code.isEmpty ? '—' : code,
-                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
-                  ),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(context), child: const Text('Kapat')),
-                  ],
-                ),
-              );
-            },
-          ),
-
               Row(
                 children: [
                   const Icon(Icons.dark_mode),
@@ -498,34 +500,12 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           floatingActionButton: FloatingActionButton.extended(
             onPressed: () async {
-              final res = await Navigator.push<Map<String, dynamic>>(
+              final created = await Navigator.push<bool>(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => CreateFlightScreen(
-                    uid: _uid,
-                    email: (FirebaseAuth.instance.currentUser?.email ?? ''),
-                  ),
-                ),
+                MaterialPageRoute(builder: (_) => CreateFlightScreen(uid: _uid)),
               );
-              if (!mounted) return;
-              if (res != null && res['created'] == true && (res['flightId'] ?? '').toString().isNotEmpty) {
-                final flightId = res['flightId'].toString();
-                // Listeyi tazele ve direkt uçuşa gir
-                setState(() {});
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => FlightDetailScreen(
-                      flightId: flightId,
-                      currentUid: _uid,
-                      forceAllow: true,
-                    ),
-                  ),
-                );
-              } else {
-                setState(() {});
-              }
-},
+              if (created == true && mounted) setState(() {});
+            },
             icon: const Icon(Icons.add),
             label: const Text('Uçuş Oluştur'),
           ),
@@ -625,7 +605,7 @@ class _PendingInvitesBar extends StatelessWidget {
     if (email.isEmpty) return const SizedBox.shrink();
 
     final q = Db.invites()
-        .where('inviteeUid', isEqualTo: uid)
+        .where('inviteeEmail', isEqualTo: email)
         .where('status', isEqualTo: 'PENDING');
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -673,7 +653,7 @@ class InvitesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final email = FirebaseAuth.instance.currentUser?.email ?? '';
     final q = Db.invites()
-        .where('inviteeUid', isEqualTo: uid)
+        .where('inviteeEmail', isEqualTo: email)
         .where('status', isEqualTo: 'PENDING');
 
     return Scaffold(
@@ -747,7 +727,7 @@ class FlightsList extends StatelessWidget {
     } else {
       // Firestore limitation: cannot OR owner==uid OR array-contains uid in one query easily.
       // We do two queries and merge client-side.
-      return _AgentHomeBody(uid: uid, email: (FirebaseAuth.instance.currentUser?.email ?? ''));
+      return _MergedAgentFlights(uid: uid);
     }
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -795,137 +775,6 @@ class FlightsList extends StatelessWidget {
   }
 }
 
-
-class _AgentHomeBody extends StatelessWidget {
-  final String uid;
-  final String email;
-  const _AgentHomeBody({required this.uid, required this.email});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _PendingInvitesList(uid: uid, email: email),
-        const Divider(height: 1),
-        Expanded(child: _MergedAgentFlights(uid: uid)),
-      ],
-    );
-  }
-}
-
-class _PendingInvitesList extends StatelessWidget {
-  final String uid;
-  final String email;
-  const _PendingInvitesList({required this.uid, required this.email});
-
-  Future<void> _acceptInvite(
-    BuildContext context, {
-    required QueryDocumentSnapshot<Map<String, dynamic>> inviteDoc,
-  }) async {
-    final data = inviteDoc.data();
-    final flightId = (data['flightId'] ?? '').toString();
-    if (flightId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Davet verisi hatalı (flightId yok).')),
-      );
-      return;
-    }
-
-    try {
-      final batch = FirebaseFirestore.instance.batch();
-      final inviteRef = inviteDoc.reference;
-
-      // 1) Invite ACCEPTED
-      batch.update(inviteRef, {
-        'status': 'ACCEPTED',
-        'acceptedByUid': uid,
-        'acceptedAt': FieldValue.serverTimestamp(),
-      });
-
-      // 2) Flight participants içine kendini ekle (self-join)
-      final flightRef = Db.flights().doc(flightId);
-      batch.update(flightRef, {
-        'participants': FieldValue.arrayUnion([uid]),
-      });
-
-      await batch.commit();
-
-      if (!context.mounted) return;
-
-      // Direkt uçuşa gir
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => FlightDetailScreen(
-            flightId: flightId,
-            currentUid: uid,
-            forceAllow: true,
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Davet kabul edilemedi: $e')),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (email.isEmpty) return const SizedBox.shrink();
-
-    final q = FirebaseFirestore.instance
-        .collection('invites')
-        .where('inviteeUid', isEqualTo: uid)
-        .limit(50);
-
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: q.snapshots(),
-      builder: (context, snap) {
-        final docsAll = snap.data?.docs ?? [];
-        final docs = docsAll.where((d) => (d.data()['status'] ?? '').toString() == 'PENDING').toList();
-
-        if (docs.isEmpty) return const SizedBox.shrink();
-
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Davetler',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 8),
-                  ...docs.map((d) {
-                    final data = d.data();
-                    final code = (data['flightCode'] ?? '').toString();
-                    final inviter = (data['createdByUid'] ?? '').toString();
-                    return ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(code.isEmpty ? '—' : code),
-                      subtitle: Text(inviter.isEmpty ? 'Davet' : 'Davet eden: $inviter'),
-                      trailing: FilledButton(
-                        onPressed: () => _acceptInvite(context, inviteDoc: d),
-                        child: const Text('Katıl'),
-                      ),
-                    );
-                  }),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _MergedAgentFlights extends StatelessWidget {
   final String uid;
   const _MergedAgentFlights({required this.uid});
@@ -934,24 +783,20 @@ class _MergedAgentFlights extends StatelessWidget {
   Widget build(BuildContext context) {
     final ownedQ = Db.flights()
         .where('ownerUid', isEqualTo: uid)
+        .orderBy('createdAt', descending: true)
         .limit(50);
 
     final partQ = Db.flights()
         .where('participants', arrayContains: uid)
+        .orderBy('createdAt', descending: true)
         .limit(50);
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: ownedQ.snapshots(),
       builder: (context, snapOwned) {
-        if (snapOwned.hasError) {
-          return Center(child: Text('Uçuş listesi okunamadı: ${snapOwned.error}'));
-        }
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: partQ.snapshots(),
           builder: (context, snapPart) {
-            if (snapPart.hasError) {
-              return Center(child: Text('Uçuş listesi okunamadı: ${snapPart.error}'));
-            }
             final owned = snapOwned.data?.docs ?? [];
             final part = snapPart.data?.docs ?? [];
             final map = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
@@ -998,7 +843,7 @@ class _MergedAgentFlights extends StatelessWidget {
                           builder: (_) => FlightDetailScreen(
                             flightId: doc.id,
                             currentUid: uid,
-                            forceAllow: true,
+                            forceAllow: false,
                           ),
                         ),
                       );
@@ -1021,79 +866,85 @@ class _MergedAgentFlights extends StatelessWidget {
 
 class CreateFlightScreen extends StatefulWidget {
   final String uid;
-  final String email;
-  const CreateFlightScreen({super.key, required this.uid, required this.email});
+  const CreateFlightScreen({super.key, required this.uid});
 
   @override
   State<CreateFlightScreen> createState() => _CreateFlightScreenState();
 }
 
 class _CreateFlightScreenState extends State<CreateFlightScreen> {
-
-  String _normalizeFlightCode(String input) {
-    var s = input.trim().toUpperCase();
-    s = s.replaceAll(RegExp(r'\s+'), '');
-    s = s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-    // Keep only patterns like AA1234, X3123, TOM857 (2-3 alnum + 1-6 digits)
-    final m = RegExp(r'^([A-Z0-9]{2,3})([0-9]{1,6})$').firstMatch(s);
-    if (m == null) return '';
-    // Remove leading zeros in number but keep at least one digit
-    final carrier = m.group(1)!;
-    var number = m.group(2)!;
-    number = number.replaceFirst(RegExp(r'^0+'), '');
-    if (number.isEmpty) number = '0';
-    return '$carrier$number';
-  }
-
-  Set<String> _flightCodeAlternatives(String code) {
-    final norm = _normalizeFlightCode(code);
-    if (norm.isEmpty) return {};
-    final m = RegExp(r'^([A-Z0-9]{2,3})([0-9]{1,6})$').firstMatch(norm);
-    if (m == null) return {norm};
-    final carrier = m.group(1)!;
-    final number = m.group(2)!;
-    const icaoToIata = _ScanTabState._icaoToIata; // reuse mapping
-    final iataToIcao = {for (final e in icaoToIata.entries) e.value: e.key};
-    final alts = <String>{norm};
-    if (carrier.length == 3) {
-      final iata = icaoToIata[carrier];
-      if (iata != null) alts.add('$iata$number');
-    }
-    if (carrier.length == 2) {
-      final icao = iataToIcao[carrier];
-      if (icao != null) alts.add('$icao$number');
-    }
-    return alts;
-  }
   final _flightCode = TextEditingController();
-  final _bookedPax = TextEditingController();
+  final _bookedPax = TextEditingController(text: '0');
+
+  final List<_PaxDraft> _paxDrafts = [];
   final List<String> _watchlistNames = [];
 
   bool _busy = false;
   String? _err;
 
-  bool _isValidFlightCode(String input) {
-    // Accept IATA (2-char) or ICAO/vendor (3-char) carrier, alphanumeric,
-    // optional space between carrier and number.
-    // Examples: LS1850, LS 1850, BA679, BA 679, OR3057, XQ0688, X3 117, TOM857
-    final norm = _normalizeFlightCode(input);
-    if (norm.isEmpty) return false;
-    return RegExp(r'^[A-Z0-9]{2,3}[0-9]{1,4}$').hasMatch(norm);
+  @override
+  void dispose() {
+    _flightCode.dispose();
+    _bookedPax.dispose();
+    super.dispose();
+  }
+
+  bool _isValidFlightCode(String v) {
+    // Accept IATA (2 alnum), ICAO (3 alnum), and allow spaces/dashes.
+    // Examples: LS1850, BA2245, TOM857, X3 117, U2 123
+    return _splitFlightCode(v) != null;
+  }
+
+  Future<void> _addPaxDialog() async {
+    final name = TextEditingController();
+    final seat = TextEditingController();
+    final pnr = TextEditingController();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Yolcu Ekle'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+              TextField(controller: seat, decoration: const InputDecoration(labelText: 'Seat')),
+              TextField(controller: pnr, decoration: const InputDecoration(labelText: 'PNR (opsiyonel)')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
+          ],
+        );
+      },
+    );
+
+    if (ok == true) {
+      setState(() {
+        _paxDrafts.add(_PaxDraft(
+          fullName: name.text.trim(),
+          seat: seat.text.trim(),
+          pnr: pnr.text.trim(),
+        ));
+      });
+    }
   }
 
   Future<void> _addWatchlistDialog() async {
     final c = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
+      builder: (context) => AlertDialog(
         title: const Text('WatchList Yolcu Ekle'),
         content: TextField(
           controller: c,
           decoration: const InputDecoration(labelText: 'İsim Soyisim'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgeç')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Ekle')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
         ],
       ),
     );
@@ -1113,53 +964,65 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     });
 
     try {
-      final codeRaw = _flightCode.text.trim().toUpperCase();
+      final codeRaw = _flightCode.text.trim();
       final code = _normalizeFlightCode(codeRaw);
       if (!_isValidFlightCode(code)) {
         throw Exception('Uçuş kodu formatı hatalı. Örn: LS976 / BA2245');
       }
 
       final booked = int.tryParse(_bookedPax.text.trim()) ?? 0;
+
       final flightRef = Db.flights().doc();
+      final now = FieldValue.serverTimestamp();
 
-      // 1) Flight dokümanını önce oluştur (tek write)
-      await flightRef.set({
-        'flightCode': code,
+      await Db.fs.runTransaction((tx) async {
+        tx.set(flightRef, {
+          'flightCode': code,
           'flightCodeRaw': codeRaw,
-          'flightCodeAlts': _flightCodeAlternatives(code).toList(),
-        'bookedPax': booked,
-        'ownerUid': widget.uid,
-        'participants': <String>[widget.uid],
-        'createdAt': Timestamp.now(),
-        'offlineMode': false,
-        'opTimes': <String, dynamic>{},
-      });
-
-      // 2) WatchList'i sonra yaz (flight artık var)
-      final wlCol = flightRef.collection('watchlist');
-      for (final n in _watchlistNames) {
-        await wlCol.add({
-          'fullName': n,
-          'createdAt': FieldValue.serverTimestamp(),
+          'bookedPax': booked,
+          'ownerUid': widget.uid,
+          'participants': <String>[],
+          'createdAt': now,
+          'offlineMode': false,
+          'opTimes': <String, dynamic>{},
         });
-      }
 
-      // 3) Log
-      await flightRef.collection('logs').add({
-        'type': 'FLIGHT_CREATED',
-        'byUid': widget.uid,
-        'byEmail': widget.email,
-        'at': FieldValue.serverTimestamp(),
-        'meta': {'watchlistCount': _watchlistNames.length},
+        // Create subcollections
+        final paxCol = flightRef.collection('pax');
+        for (final p in _paxDrafts) {
+          tx.set(paxCol.doc(), {
+            'fullName': p.fullName,
+            'seat': p.seat,
+            'pnr': p.pnr,
+            'status': 'NONE',
+            'boardedAt': null,
+            'boardedByUid': null,
+            'boardedByEmail': null,
+            'offloadedAt': null,
+            'offloadedByUid': null,
+            'offloadedByEmail': null,
+            'createdAt': now,
+          });
+        }
+
+        final wlCol = flightRef.collection('watchlist');
+        for (final n in _watchlistNames) {
+          tx.set(wlCol.doc(), {
+            'fullName': n,
+            'createdAt': now,
+          });
+        }
+
+        final logCol = flightRef.collection('logs');
+        tx.set(logCol.doc(), {
+          'type': 'FLIGHT_CREATED',
+          'byUid': widget.uid,
+          'at': now,
+          'meta': {'paxCount': _paxDrafts.length, 'watchlistCount': _watchlistNames.length},
+        });
       });
 
-      if (!mounted) return;
-
-      // Home ekrana flightId dön: otomatik açmak için
-      Navigator.pop(context, <String, dynamic>{
-        'created': true,
-        'flightId': flightRef.id,
-      });
+      if (mounted) Navigator.pop(context, true);
     } catch (e) {
       setState(() => _err = e.toString());
     } finally {
@@ -1178,7 +1041,6 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   TextField(
                     controller: _flightCode,
@@ -1193,19 +1055,15 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
                     decoration: const InputDecoration(labelText: 'Booked Pax'),
                     keyboardType: TextInputType.number,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   Row(
                     children: [
-                      const Expanded(
-                        child: Text(
-                          'WatchList',
-                          style: TextStyle(fontWeight: FontWeight.w600),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _addWatchlistDialog,
+                          icon: const Icon(Icons.person_add),
+                          label: const Text('WatchList Veri Ekle'),
                         ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: _busy ? null : _addWatchlistDialog,
-                        icon: const Icon(Icons.person_add_alt_1),
-                        label: const Text('Ekle'),
                       ),
                     ],
                   ),
@@ -1214,33 +1072,64 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
                     items: _watchlistNames,
                     onRemove: (i) => setState(() => _watchlistNames.removeAt(i)),
                   ),
-                  if (_err != null) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      _err!,
-                      style: TextStyle(color: Theme.of(context).colorScheme.error),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  FilledButton.icon(
-                    onPressed: _busy ? null : _create,
-                    icon: _busy
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.save),
-                    label: const Text('Uçuşu Kaydet'),
+                  const Divider(height: 28),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _addPaxDialog,
+                          icon: const Icon(Icons.group_add),
+                          label: const Text('Yolcu Ekle'),
+                        ),
+                      ),
+                    ],
                   ),
+                  const SizedBox(height: 8),
+                  Text('Yolcu sayısı: ${_paxDrafts.length}'),
+                  const SizedBox(height: 8),
+                  ..._paxDrafts.map((p) => ListTile(
+                        title: Text(p.fullName.isEmpty ? '—' : p.fullName),
+                        subtitle: Text('Seat: ${p.seat}  •  PNR: ${p.pnr.isEmpty ? "—" : p.pnr}'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () => setState(() => _paxDrafts.remove(p)),
+                        ),
+                      )),
                 ],
               ),
             ),
+          ),
+          if (_err != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                _err!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _busy ? null : _create,
+            icon: _busy
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save),
+            label: const Text('Uçuşu Kaydet'),
           ),
         ],
       ),
     );
   }
+}
+
+class _PaxDraft {
+  final String fullName;
+  final String seat;
+  final String pnr;
+  _PaxDraft({required this.fullName, required this.seat, required this.pnr});
 }
 
 class _ChipsWrap extends StatelessWidget {
@@ -1294,118 +1183,15 @@ class FlightDetailScreen extends StatefulWidget {
 class _FlightDetailScreenState extends State<FlightDetailScreen> {
   late final flightRef = Db.flights().doc(widget.flightId);
 
-  Future<bool> _isSupervisor() async {
-    try {
-      final u = await Db.userDoc(widget.currentUid).get();
-      return (u.data()?['role'] ?? '').toString() == 'Supervisor';
-    } catch (_) {
-      return false;
-    }
-  }
-
-  Future<void> _deleteFlightAndNotify({required String flightCode}) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Uçuşu sil'),
-        content: Text('Uçuş silinecek: $flightCode\n\nSadece Supervisor silebilir. Devam edilsin mi?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Sil')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-
-    // 1) Logları çek (özet mail içeriği)
-    String report = '';
-    try {
-      final f = await flightRef.get();
-      final data = f.data() ?? {};
-      final owner = (data['ownerUid'] ?? '').toString();
-      final participants = (data['participants'] is List) ? List<String>.from(data['participants']) : <String>[];
-      final createdAt = data['createdAt'];
-      report += 'GOZEN BOARDING PRO\n';
-      report += 'Silinen Uçuş: $flightCode\n';
-      report += 'FlightId: ${flightRef.id}\n';
-      report += 'OwnerUid: $owner\n';
-      report += 'Participants: ${participants.join(', ')}\n';
-      report += 'CreatedAt: $createdAt\n';
-      report += 'DeletedByUid: ${widget.currentUid}\n';
-      report += 'DeletedAt: ${DateTime.now().toIso8601String()}\n\n';
-
-      // logs
-      final logs = await flightRef.collection('logs').limit(500).get();
-      report += '--- LOGS (up to 500) ---\n';
-      for (final d in logs.docs) {
-        report += '${d.id}: ${d.data()}\n';
-      }
-      report += '\n';
-
-      // boardings/offloads counts
-      final b = await flightRef.collection('boardings').get();
-      final o = await flightRef.collection('offloads').get();
-      report += 'BoardingsCount: ${b.size}\n';
-      report += 'OffloadsCount: ${o.size}\n';
-    } catch (e) {
-      report += 'Report oluşturulamadı: $e\n';
-    }
-
-    // 2) Paylaş / mail taslağı (platforma göre mail uygulaması seçilebilir)
-    try {
-      await Share.share(
-        'TO: vlkntskrn@gmail.com\nSUBJECT: GOZEN BOARDING PRO - Flight Deleted - $flightCode\n\n$report',
-        subject: 'GOZEN BOARDING PRO - Flight Deleted - $flightCode',
-      );
-    } catch (_) {}
-
-    // 3) Alt koleksiyonları sil (küçük dataset varsayımı). Büyük uçuşlarda Cloud Function önerilir.
-    Future<void> deleteSubcollection(String name) async {
-      while (true) {
-        final snap = await flightRef.collection(name).limit(400).get();
-        if (snap.docs.isEmpty) break;
-        final batch = FirebaseFirestore.instance.batch();
-        for (final d in snap.docs) {
-          batch.delete(d.reference);
-        }
-        await batch.commit();
-      }
-    }
-
-    try {
-      for (final c in ['watchlist', 'boardings', 'offloads', 'logs', 'staff', 'equipment']) {
-        await deleteSubcollection(c);
-      }
-      await flightRef.delete();
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Uçuş silindi.')));
-      Navigator.pop(context);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Silme başarısız: $e')));
-    }
-  }
-
-
   Future<_Access> _checkAccess() async {
     final doc = await flightRef.get();
     if (!doc.exists) return _Access(allowed: false, reason: 'Uçuş bulunamadı.');
 
-    if (widget.forceAllow) return _Access(allowed: true, reason: null);
-
-    // Supervisor: davetsiz tüm uçuşlara girebilir
-    try {
-      final u = await Db.userDoc(widget.currentUid).get();
-      final role = (u.data()?['role'] ?? '').toString();
-      if (role == 'Supervisor') return _Access(allowed: true, reason: null);
-    } catch (_) {
-      // ignore role read failures here; access will fall back to owner/participants
-    }
-
     final data = doc.data()!;
     final owner = (data['ownerUid'] ?? '').toString();
     final participants = List<String>.from(data['participants'] ?? []);
+
+    if (widget.forceAllow) return _Access(allowed: true, reason: null);
 
     if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
     if (participants.contains(widget.currentUid)) return _Access(allowed: true, reason: null);
@@ -1443,20 +1229,6 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
               child: Scaffold(
                 appBar: AppBar(
                   title: Text('Uçuş: $code'),
-                  actions: [
-                    FutureBuilder<bool>(
-                      future: _isSupervisor(),
-                      builder: (context, snapRole) {
-                        final isSup = snapRole.data == true;
-                        if (!isSup) return const SizedBox.shrink();
-                        return IconButton(
-                          tooltip: 'Uçuşu sil (Supervisor)',
-                          icon: const Icon(Icons.delete_forever),
-                          onPressed: () => _deleteFlightAndNotify(flightCode: code),
-                        );
-                      },
-                    ),
-                  ],
                   bottom: const TabBar(
                     isScrollable: true,
                     tabs: [
@@ -1517,32 +1289,10 @@ class _ScanTabState extends State<ScanTab> {
   final _manualScan = TextEditingController();
   bool _busy = false;
 
-  late final OfflineQueue _queue;
-  int _queuedCount = 0;
-
-  // Camera scanning (mobile/desktop); web uses manual input.
-  late final MobileScannerController _scannerController;
-  bool _manualTrigger = false;
-  bool _armed = true; // when manualTrigger=false, always armed
-  DateTime? _lastScanAt;
-  String? _lastScanRaw;
-
   @override
   void initState() {
     super.initState();
-    _queue = OfflineQueue(widget.flightRef.id);
-    _scannerController = MobileScannerController(
-      facing: CameraFacing.back,
-      torchEnabled: false,
-      detectionSpeed: DetectionSpeed.noDuplicates,
-    );
-    _refreshQueuedCount();
     _loadOffline();
-  }
-
-  Future<void> _refreshQueuedCount() async {
-    final c = await _queue.count();
-    if (mounted) setState(() => _queuedCount = c);
   }
 
   Future<void> _loadOffline() async {
@@ -1553,62 +1303,8 @@ class _ScanTabState extends State<ScanTab> {
 
   Future<void> _toggleOffline(bool v) async {
     setState(() => _offline = v);
-    // Persist flag on flight for visibility across tabs/devices
     await widget.flightRef.set({'offlineMode': v}, SetOptions(merge: true));
     await _log('OFFLINE_MODE_TOGGLED', meta: {'value': v});
-
-    if (!v) {
-      // Turning OFF offline => attempt flush queued operations
-      await _flushQueue();
-    } else {
-      await _refreshQueuedCount();
-    }
-  }
-
-  Future<void> _flushQueue() async {
-    final ops = await _queue.load();
-    if (ops.isEmpty) return;
-    setState(() => _busy = true);
-
-    int ok = 0;
-    String? lastErr;
-    for (final op in ops) {
-      try {
-        final type = (op['type'] ?? '').toString();
-        if (type == 'SCAN_BOARD') {
-          final raw = (op['raw'] ?? '').toString();
-          final choice = (op['choice'] ?? '').toString(); // PRE / RANDOM
-          final isInf = (op['isInfant'] ?? false) == true;
-          await _processScanString(
-            raw,
-            overrideChoice: choice.isEmpty ? null : choice,
-            overrideIsInfant: isInf,
-            suppressDialogs: true,
-            suppressResultUi: true,
-          );
-        }
-        ok++;
-        await _queue.popFirst();
-      } catch (e) {
-        lastErr = e.toString();
-        break; // keep remaining in queue
-      }
-    }
-
-    await _refreshQueuedCount();
-    if (mounted) {
-      setState(() => _busy = false);
-      if (ok > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Offline kuyruğu gönderildi: $ok işlem')),
-        );
-      }
-      if (lastErr != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Offline sync hata: $lastErr')),
-        );
-      }
-    }
   }
 
   Future<String> _emailOf(String uid) async {
@@ -1627,18 +1323,12 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   Future<bool> _isWatchlistMatch(String fullName) async {
-    final targetVars = _nameVariants(fullName);
-    if (targetVars.isEmpty) return false;
-
-    final snap = await widget.flightRef.collection('watchlist').limit(500).get();
-    for (final d in snap.docs) {
-      final n = (d.data()['fullName'] ?? '').toString();
-      final vars = _nameVariants(n);
-      for (final v in vars) {
-        if (targetVars.contains(v)) return true;
-      }
-    }
-    return false;
+    final q = await widget.flightRef
+        .collection('watchlist')
+        .where('fullName', isEqualTo: fullName)
+        .limit(1)
+        .get();
+    return q.docs.isNotEmpty;
   }
 
   Future<void> _showResultScreen({
@@ -1688,472 +1378,86 @@ class _ScanTabState extends State<ScanTab> {
     );
   }
 
-  // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
-  // -------- Scan helpers --------
-  String _normalizeFlightCode(String code) {
-    final c = code
-        .toUpperCase()
-        .replaceAll(RegExp(r'[^A-Z0-9]'), '')
-        .trim();
-    final m = RegExp(r'^([A-Z0-9]{2,3})(0*[0-9]{1,6})$').firstMatch(c);
-    if (m == null) return c;
-    final carrier = m.group(1) ?? '';
-    var num = (m.group(2) ?? '').replaceFirst(RegExp(r'^0+'), '');
-    if (num.isEmpty) num = '0';
-    return '$carrier$num';
-  }
+  // Accept multiple scan payload formats:
+  // - Manual: FLIGHTCODE|FULLNAME|SEAT|PNR
+  // - IATA BCBP barcode (PDF417/Aztec/QR) raw payload
+  // - OCR text fallback (best-effort)
+  Future<void> _processScanString(String raw) async {
+    String? fullName;
+    String? seat;
+    String? pnr;
 
-  /// Split a normalized flight code into (carrier, number). Returns null if invalid.
-  ({String carrier, String number})? _splitFlightCode(String code) {
-    final m = RegExp(r'^([A-Z0-9]{2,3})([0-9]{1,6})$').firstMatch(code);
-    if (m == null) return null;
-    return (carrier: m.group(1)!, number: m.group(2)!);
-  }
-
-  /// ICAO <-> IATA (non-exhaustive; add as needed). We keep both for matching.
-  static const Map<String, String> _icaoToIata = {
-    'TOM': 'BY', // TUI Airways (legacy)
-    'TFL': 'OR', // TUI fly Netherlands (Arke)
-    'EXS': 'LS', // Jet2
-    'SXS': 'XQ', // SunExpress
-    'BAW': 'BA', // British Airways
-    'FHY': 'FH', // Freebird
-    // Add more here safely.
-  };
-
-  Map<String, String> get _iataToIcao => {
-        for (final e in _icaoToIata.entries) e.value: e.key,
-      };
-
-  Set<String> _flightCodeAlternatives(String code) {
-    final norm = _normalizeFlightCode(code);
-    if (norm.isEmpty) return {};
-    final parts = _splitFlightCode(norm);
-    if (parts == null) return {norm};
-
-    final carrier = parts.carrier;
-    final number = parts.number;
-
-    final alts = <String>{norm};
-
-    // If carrier is ICAO (3), add IATA alt if known.
-    if (carrier.length == 3) {
-      final iata = _icaoToIata[carrier];
-      if (iata != null) alts.add('$iata$number');
+    // Extract flight code from the payload.
+    final scanFlight = _extractFlightCodeFromScanPayload(raw);
+    if (scanFlight == null) {
+      throw Exception('Biniş kartı içinden uçuş kodu okunamadı.');
     }
 
-    // If carrier is IATA (2), add ICAO alt if known.
-    if (carrier.length == 2) {
-      final icao = _iataToIcao[carrier];
-      if (icao != null) alts.add('$icao$number');
-    }
-
-    return alts;
-  }
-
-  bool _flightCodeMatches(String expected, String scanned) {
-    final e = _flightCodeAlternatives(expected);
-    final s = _flightCodeAlternatives(scanned);
-    return e.intersection(s).isNotEmpty;
-  }
-
-  String _normalizeName(String s) {
-    var v = s.trim().toLowerCase();
-
-    // Turkish diacritics
-    const map = {
-      'ç': 'c',
-      'ğ': 'g',
-      'ı': 'i',
-      'ö': 'o',
-      'ş': 's',
-      'ü': 'u',
-      'â': 'a',
-      'î': 'i',
-      'û': 'u',
-    };
-    map.forEach((k, val) {
-      v = v.replaceAll(k, val);
-    });
-
-    // Remove common honorifics/titles (mr/mrs/ms...) as tokens
-    v = v.replaceAll(
-      RegExp(r'\b(mr|mrs|ms|miss|mstr|dr|sir|madam)\b\.?', caseSensitive: false),
-      ' ',
-    );
-
-    // Keep spaces for tokenization, wipe punctuation
-    v = v.replaceAll(RegExp(r'[^a-z0-9 ]'), ' ');
-    v = v.replaceAll(RegExp(r'\s+'), ' ').trim();
-
-    // Join tokens => "volkan tas" -> "volkantas"
-    var joined = v.replaceAll(' ', '');
-
-    // Remove leading title fragments even when concatenated: "mrvolkantas", "mrstasvolkan"
-    joined = joined.replaceFirst(RegExp(r'^(mr|mrs|ms|miss|mstr|dr|sir|madam)+'), '');
-    joined = joined.replaceFirst(RegExp(r'(mr|mrs|ms|miss|mstr|dr|sir|madam)+$'), '');
-
-    return joined;
-  }
-
-  Set<String> _nameVariants(String s) {
-    var tmp = s.trim().toLowerCase();
-    if (tmp.isEmpty) return {};
-
-    // Turkish diacritics
-    const map = {
-      'ç': 'c',
-      'ğ': 'g',
-      'ı': 'i',
-      'ö': 'o',
-      'ş': 's',
-      'ü': 'u',
-      'â': 'a',
-      'î': 'i',
-      'û': 'u',
-    };
-    map.forEach((k, val) {
-      tmp = tmp.replaceAll(k, val);
-    });
-
-    tmp = tmp.replaceAll(
-      RegExp(r'\b(mr|mrs|ms|miss|mstr|dr|sir|madam)\b\.?', caseSensitive: false),
-      ' ',
-    );
-    tmp = tmp.replaceAll(RegExp(r'[^a-z0-9 ]'), ' ');
-    tmp = tmp.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (tmp.isEmpty) return {};
-
-    final tokens = tmp.split(' ').where((t) => t.isNotEmpty).toList();
-    if (tokens.isEmpty) return {};
-
-    String joinTokens(List<String> t) {
-      var j = t.join('');
-      j = j.replaceFirst(RegExp(r'^(mr|mrs|ms|miss|mstr|dr|sir|madam)+'), '');
-      j = j.replaceFirst(RegExp(r'(mr|mrs|ms|miss|mstr|dr|sir|madam)+$'), '');
-      return j;
-    }
-
-    final out = <String>{};
-    out.add(joinTokens(tokens));
-    if (tokens.length >= 2) out.add(joinTokens(tokens.reversed.toList()));
-    return out.where((e) => e.isNotEmpty).toSet();
-  }
-
-  String _extractFlightCode(String input) {
-    // Supports:
-    // 1) Plain text like "LS0476", "BA 2245", "EXS 00476"
-    // 2) IATA BCBP (PDF417) fixed-width format starting with "M1"
-    //
-    // Returns canonical flight code: <carrier><flightNo>, with flightNo stripped of leading zeros.
-    final raw = input
-        .toUpperCase()
-        // Remove common control chars (GS=29, RS=30, US=31, etc.)
-        .replaceAll(RegExp(r'[\x00-\x1F]'), ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-
-    String canon(String carrier, String flightNo) {
-      final c = carrier.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-      var n = flightNo.replaceAll(RegExp(r'[^0-9]'), '');
-      n = n.replaceFirst(RegExp(r'^0+'), '');
-      if (n.isEmpty) n = '0';
-      return '$c$n';
-    }
-
-    // ICAO->IATA mapping for common airlines seen on boarding passes.
-    // (BCBP uses a 3-char "operating carrier designator"; ops usually use 2-char IATA.)
-    const Map<String, String> icaoToIata = _icaoToIata;
-
-    // ---- 1) BCBP fixed position parse (best signal) ----
-    // Minimal BCBP length is ~60+ chars. We look for segment starting with M1/M2.
-    final bcbpIdx = raw.indexOf(RegExp(r'\bM[0-9]'));
-    if (bcbpIdx >= 0 && raw.length >= bcbpIdx + 45) {
-      // Layout (IATA BCBP):
-      // 2: format code (M1)
-      // 20: passenger name
-      // 1: electronic ticket indicator
-      // 7: PNR
-      // 3+3: from/to
-      // 3: operating carrier designator
-      // 5: flight number (right aligned, can include spaces/zeros)
-      try {
-        final carrier3 = raw.substring(bcbpIdx + 36, bcbpIdx + 39).trim();
-        final flight5 = raw.substring(bcbpIdx + 39, bcbpIdx + 44).trim();
-        if (carrier3.isNotEmpty && flight5.isNotEmpty) {
-          final mapped = icaoToIata[carrier3] ?? carrier3;
-          return canon(mapped, flight5);
-        }
-      } catch (_) {
-        // fall through
+    // 1) Manual format: FLIGHTCODE|FULLNAME|SEAT|PNR
+    if (raw.contains('|')) {
+      final parts = raw.split('|').map((e) => e.trim()).toList();
+      if (parts.length >= 3) {
+        fullName = parts[1];
+        seat = parts[2];
+        pnr = parts.length >= 4 ? parts[3] : '';
       }
     }
 
-    // ---- 2) Generic regex extraction (handles lots of vendor variations) ----
-    // Prefer patterns with 2-3 letters then 1-5 digits.
-    final m = RegExp(r'\b([A-Z0-9]{2,3})\s*0*([0-9]{1,5})\b').firstMatch(raw);
-    if (m != null) {
-      final carrier = m.group(1) ?? '';
-      final number = m.group(2) ?? '';
-      return canon(carrier, number);
+    // 2) BCBP fixed width (if manual parsing didn't provide fields)
+    if ((fullName == null || seat == null) && RegExp(r'^[Mm]').hasMatch(raw.trim())) {
+      final bcbp = raw.replaceAll('\n', '').replaceAll('\r', '');
+      if (bcbp.length >= 56) {
+        fullName ??= bcbp.substring(1, 21).trim();
+        pnr ??= bcbp.substring(22, 29).trim();
+        seat ??= bcbp.substring(46, 50).trim();
+      }
     }
 
-    // ---- 3) Last resort: scan for any digit-run that looks like a flight number near a carrier ----
-    // Some decoders remove separators; try sliding window.
-    final all = RegExp(r'([A-Z]{2,3})([0-9]{2,6})').allMatches(raw).toList();
-    if (all.isNotEmpty) {
-      final mm = all.first;
-      final carrier = mm.group(1) ?? '';
-      final number = mm.group(2) ?? '';
-      return canon(carrier, number);
-    }
-
-    throw Exception('Boarding kart içinden uçuş kodu okunamadı');
-  }
-
-
-  String _extractSeat(String raw) {
-    final m = RegExp(r'\b\d{1,2}[A-Z]\b').firstMatch(raw.toUpperCase());
-    return m?.group(0) ?? '';
-  }
-
-  String _extractPnr(String raw) {
-    // PNR genelde 6 karakter alfanümerik
-    final matches = RegExp(r'\b[A-Z0-9]{6}\b').allMatches(raw.toUpperCase()).toList();
-    if (matches.isEmpty) return '';
-    // flight code gibi görünenleri ele
-    for (final mm in matches) {
-      final v = mm.group(0) ?? '';
-      if (!RegExp(r'^[A-Z]{2,3}\d{3,4}$').hasMatch(v)) return v;
-    }
-    return matches.first.group(0) ?? '';
-  }
-
-  String _extractName(String raw) {
-    // Eğer manuel format değilse isim yakalamak her boarding kartında garanti değil.
-    // Bu yüzden "NAME:" gibi anahtarlar varsa kullan, yoksa boş dön.
-    final up = raw.toUpperCase();
-    final idx = up.indexOf('NAME:');
-    if (idx >= 0) {
-      final sub = raw.substring(idx + 5).trim();
-      final cut = sub.indexOf('|');
-      return (cut >= 0 ? sub.substring(0, cut) : sub).trim();
-    }
-    return '';
-  }
-
-  String _hash32(String raw) {
-    // FNV-1a 32-bit (deterministic)
-    int hash = 0x811c9dc5;
-    for (final c in raw.codeUnits) {
-      hash ^= c;
-      hash = (hash * 0x01000193) & 0xFFFFFFFF;
-    }
-    return hash.toRadixString(16).padLeft(8, '0');
-  }
-
-  Future<String> _usernameLowerOf(String uid) async {
-    final s = await Db.userDoc(uid).get();
-    return (s.data()?['usernameLower'] ?? '').toString();
-  }
-
-  // Manual scan supports:
-  // 1) FLIGHTCODE|FULLNAME|SEAT|PNR
-  // 2) Raw barcode/QR string (best-effort parse)
-  Future<void> _processScanString(
-    String raw, {
-    String? overrideChoice, // 'PRE' or 'RANDOM'
-    bool? overrideIsInfant,
-    bool suppressDialogs = false,
-    bool suppressResultUi = false,
-  }) async {
-    final cleaned = raw.trim();
-    if (cleaned.isEmpty) return;
-
-    String flightCode = '';
-    String fullName = '';
-    String seat = '';
-    String pnr = '';
-
-    final parts = cleaned.split('|').map((e) => e.trim()).toList();
-    if (parts.length >= 3 && _extractFlightCode(parts[0]).isNotEmpty) {
-      // Manual structured input
-      flightCode = parts[0].toUpperCase();
-      fullName = parts[1];
-      seat = parts[2].toUpperCase();
-      pnr = parts.length >= 4 ? parts[3].toUpperCase() : '';
-    } else {
-      // Raw barcode/QR
-      flightCode = _extractFlightCode(cleaned);
-      seat = _extractSeat(cleaned);
-      pnr = _extractPnr(cleaned);
-      fullName = _extractName(cleaned); // may be empty
-    }
+    fullName ??= 'UNKNOWN';
+    seat ??= 'NA';
+    pnr ??= '';
 
     final fSnap = await widget.flightRef.get();
-    final fCode = (fSnap.data()?['flightCode'] ?? '').toString().toUpperCase();
-    final normExpected = _normalizeFlightCode(fCode);
-    final normScanned = _normalizeFlightCode(flightCode);
+    final selectedCode = (fSnap.data()?['flightCode'] ?? '').toString();
+    final selectedRaw = (fSnap.data()?['flightCodeRaw'] ?? '').toString();
 
-    if (flightCode.isEmpty) {
-      throw Exception('Boarding card içinden uçuş kodu okunamadı.');
+    // Flexible match: ignore spaces/punct, accept IATA<->ICAO mappings.
+    if (!_flightCodesEquivalent(selectedCode, scanFlight) &&
+        !_flightCodesEquivalent(selectedRaw, scanFlight)) {
+      throw Exception(
+          'Uçuş kodu eşleşmedi. Beklenen: ${_normalizeFlightCode(selectedCode)}');
     }
 
-    if (normScanned != normExpected) {
-      if (!suppressResultUi) await _showResultScreen(
-        bg: const Color(0xFF6A1B9A), // Purple
-        title: 'WRONG FLIGHT!!\nFLIGHT NUMBER DOES NOT MATCH',
-      );
-      await _log('SCAN_WRONG_FLIGHT', meta: {'scannedFlightCode': flightCode, 'expectedFlightCode': fCode, 'scannedNorm': normScanned, 'expectedNorm': normExpected});
-      return;
-    }
+    // Offer Pre-BOARD vs DFT Random
+    final isWl = await _isWatchlistMatch(fullName);
 
-    // Watchlist match (by name if available)
-    final isWl = fullName.isNotEmpty ? await _isWatchlistMatch(fullName) : false;
-
-    // Duplicate by boarding pass raw hash
-    var bpId = _hash32('$normExpected|$cleaned');
-    var boardingRef = widget.flightRef.collection('boardings').doc(bpId);
-    final existing = await boardingRef.get();
-
-    // Seat-duplicate (INFANT case): infants may share same seat number with adult.
-    bool seatDuplicate = false;
-    QueryDocumentSnapshot<Map<String, dynamic>>? seatOccupant;
-    if (seat.isNotEmpty && seat.toUpperCase() != '—') {
-      final paxSnap = await widget.flightRef.collection('pax').limit(1000).get();
-      for (final d in paxSnap.docs) {
-        final data = d.data();
-        final st = (data['status'] ?? 'NONE').toString();
-        final sSeat = (data['seat'] ?? '').toString().toUpperCase();
-        final isInf = (data['isInfant'] ?? false) == true;
-        if (!isInf && sSeat == seat.toUpperCase() && (st == 'PREBOARDED' || st == 'DFT_BOARDED')) {
-          seatDuplicate = true;
-          seatOccupant = d;
-          break;
-        }
-      }
-    }
-
-    if (existing.exists) {
-      if (isWl) {
-        if (!suppressResultUi) await _showResultScreen(
-          bg: Colors.red,
-          title: 'FLY PASSANGER ATTANTION!!!',
-          subtitle: 'ALREADY BOARDED / DUPLICATED BOARDING PASS',
-        );
-      } else {
-        if (!suppressResultUi) await _showResultScreen(
-          bg: Colors.grey,
-          title: 'ALREADY BOARDED\nDUPLICATED BOARDING PASS',
-        );
-      }
-      await _log('SCAN_DUPLICATE', meta: {'bpId': bpId, 'watchlistMatch': isWl});
-      return;
-    }
-
-    bool isInfant = false;
-    if (seatDuplicate) {
-      bool? ans = overrideIsInfant;
-      if (ans == null && !suppressDialogs) {
-        ans = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Mükerrer Seat'),
-            content: Text(
-              'Bu seat numarası daha önce boardlandı: ${seat.toUpperCase()}\n\nYolcu INFANT mı?',
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
-              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, INFANT')),
-            ],
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Boarding Seçimi'),
+        content: Text(isWl
+            ? 'WatchList MATCH: Sadece RANDOM SELECTION seçilebilir.'
+            : 'İki seçenek: Pre-BOARD veya DFT Random'),
+        actions: [
+          TextButton(
+            onPressed: isWl ? null : () => Navigator.pop(context, 'PRE'),
+            child: const Text('Pre-BOARD'),
           ),
-        );
-      }
-
-      if (ans == true) {
-        isInfant = true;
-        // deterministic base + uniqueness for infant (same seat / same name) to allow multiple scans
-        bpId = _hash32('$normExpected|$cleaned|INFANT|${DateTime.now().microsecondsSinceEpoch}');
-        boardingRef = widget.flightRef.collection('boardings').doc(bpId);
-      } else {
-
-        if (isWl) {
-          if (!suppressResultUi) await _showResultScreen(
-            bg: Colors.red,
-            title: 'FLY PASSANGER ATTANTION!!!',
-            subtitle: 'ALREADY BOARDED / DUPLICATED BOARDING PASS',
-          );
-        } else {
-          if (!suppressResultUi) await _showResultScreen(
-            bg: Colors.grey,
-            title: 'ALREADY BOARDED\nDUPLICATED BOARDING PASS',
-          );
-        }
-        await _log('SCAN_DUPLICATE_SEAT', meta: {'seat': seat.toUpperCase(), 'watchlistMatch': isWl});
-        return;
-      }
-    }
-
-    String? choice = overrideChoice;
-    if (choice == null && !suppressDialogs) {
-      choice = await showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Boarding Seçimi'),
-          content: Text(isWl
-              ? 'WatchList MATCH: Sadece RANDOM SELECTION seçilebilir.'
-              : 'İki seçenek: Pre-BOARD veya DFT Random'),
-          actions: [
-            TextButton(
-              onPressed: isWl ? null : () => Navigator.pop(context, 'PRE'),
-              child: const Text('Pre-BOARD'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, 'RANDOM'),
-              child: const Text('DFT Random'),
-            ),
-          ],
-        ),
-      );
-    }
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'RANDOM'),
+            child: const Text('DFT Random'),
+          ),
+        ],
+      ),
+    );
 
     if (choice == null) return;
 
-    // Enforce: watchlist match -> ONLY random
-    if (isWl && choice == 'PRE') {
-      choice = 'RANDOM';
-    }
-
-
-    // OFFLINE MODE: enqueue operation and exit (will be synced when online)
-    if (_offline) {
-      await _queue.enqueue({
-        'type': 'SCAN_BOARD',
-        'raw': raw,
-        'choice': choice,
-        'isInfant': isInfant,
-        'queuedAt': DateTime.now().toIso8601String(),
-      });
-      await _refreshQueuedCount();
-      if (!suppressResultUi) {
-        await _showResultScreen(
-          bg: Colors.orange,
-          title: 'OFFLINE QUEUED',
-          subtitle: 'Bu işlem online olunca otomatik sync edilecek.',
-        );
-      }
-      return;
-    }
-
-    // Pax identity (no external pax list): create/update pax record from scan
-    // If fullName is missing from QR, allow placeholder but still record scan.
+    // Find existing pax by (fullName + seat) or create if missing.
     final paxCol = widget.flightRef.collection('pax');
-    final nameSafe = fullName.isEmpty ? '—' : fullName;
-    final seatSafe = seat.isEmpty ? '—' : seat;
-
     final q = await paxCol
-        .where('fullName', isEqualTo: nameSafe)
-        .where('seat', isEqualTo: seatSafe)
+        .where('fullName', isEqualTo: fullName)
+        .where('seat', isEqualTo: seat)
         .limit(1)
         .get();
 
@@ -2163,25 +1467,15 @@ class _ScanTabState extends State<ScanTab> {
     } else {
       paxRef = paxCol.doc();
       await paxRef.set({
-        'fullName': nameSafe,
-        'seat': seatSafe,
+        'fullName': fullName,
+        'seat': seat,
         'pnr': pnr,
         'status': 'NONE',
         'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
     }
 
-
-    // Infant meta (seat shared with adult)
-    if (isInfant) {
-      await paxRef.set({
-        'isInfant': true,
-        'parentSeat': seatSafe,
-        'linkedAdultPaxId': seatOccupant?.id,
-      }, SetOptions(merge: true));
-    }
     final byEmail = await _emailOf(widget.currentUid);
-    final byUsernameLower = await _usernameLowerOf(widget.currentUid);
     final now = FieldValue.serverTimestamp();
 
     if (choice == 'PRE') {
@@ -2190,28 +1484,11 @@ class _ScanTabState extends State<ScanTab> {
         'boardedAt': now,
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
-        'boardedByUsernameLower': byUsernameLower,
-              'watchlistMatch': isWl,
       }, SetOptions(merge: true));
 
-      await boardingRef.set({
-        'bpId': bpId,
-        'raw': cleaned,
-        'flightCode': fCode,
-        'fullName': nameSafe,
-        'seat': seatSafe,
-        'pnr': pnr,
-        'kind': 'PRE',
-        'watchlistMatch': isWl,
-        'boardedAt': now,
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        'boardedByUsernameLower': byUsernameLower,
-      });
+      await _log('PAX_PREBOARDED', meta: {'fullName': fullName, 'seat': seat});
 
-      await _log('PAX_PREBOARDED', meta: {'fullName': nameSafe, 'seat': seatSafe});
-
-      if (!suppressResultUi) await _showResultScreen(
+      await _showResultScreen(
         bg: Colors.green,
         title: 'PRE-BOARD SUCCESSFULL',
       );
@@ -2221,35 +1498,18 @@ class _ScanTabState extends State<ScanTab> {
         'boardedAt': now,
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
-        'boardedByUsernameLower': byUsernameLower,
-              'watchlistMatch': isWl,
       }, SetOptions(merge: true));
 
-      await boardingRef.set({
-        'bpId': bpId,
-        'raw': cleaned,
-        'flightCode': fCode,
-        'fullName': nameSafe,
-        'seat': seatSafe,
-        'pnr': pnr,
-        'kind': 'RANDOM',
-        'watchlistMatch': isWl,
-        'boardedAt': now,
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        'boardedByUsernameLower': byUsernameLower,
-      });
-
-      await _log('PAX_RANDOM_SELECTED', meta: {'fullName': nameSafe, 'seat': seatSafe, 'watchlistMatch': isWl});
+      await _log('PAX_RANDOM_SELECTED', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl});
 
       if (isWl) {
-        if (!suppressResultUi) await _showResultScreen(
+        await _showResultScreen(
           bg: Colors.red,
           title: 'FLY PASSANGER ATTANTION!!!',
           subtitle: 'RANDOM SELECTION SUCCESSFULL',
         );
       } else {
-        if (!suppressResultUi) await _showResultScreen(
+        await _showResultScreen(
           bg: Colors.blue,
           title: 'RANDOM SELECTION SUCCESSFULL',
         );
@@ -2299,78 +1559,13 @@ class _ScanTabState extends State<ScanTab> {
 
     if (offload) {
       final byEmail = await _emailOf(widget.currentUid);
-      final byUsernameLower = await _usernameLowerOf(widget.currentUid);
-      final now = FieldValue.serverTimestamp();
-
-      final dataSel = selected.data();
-      final seatSel = (dataSel['seat'] ?? '').toString().toUpperCase();
-      final isInfSel = (dataSel['isInfant'] ?? false) == true;
-
-      // Find linked pax with same seat (infant <-> adult) that is currently boarded
-      final paxSnapAll = await widget.flightRef.collection('pax').limit(1500).get();
-      final linked = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-      for (final d in paxSnapAll.docs) {
-        if (d.id == selected.id) continue;
-        final dd = d.data();
-        final st = (dd['status'] ?? 'NONE').toString();
-        final sSeat = (dd['seat'] ?? '').toString().toUpperCase();
-        final isInf = (dd['isInfant'] ?? false) == true;
-        if (sSeat == seatSel && (st == 'PREBOARDED' || st == 'DFT_BOARDED') && (isInfSel != isInf)) {
-          linked.add(d);
-        }
-      }
-
-      bool offloadTogether = false;
-      if (linked.isNotEmpty && seatSel.isNotEmpty && seatSel != '—') {
-        final ans = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('INFANT uyarısı'),
-            content: Text('Bu seat numarası için bağlı INFANT/Adult yolcu bulundu: $seatSel\n\nBirlikte OFFLOAD edilsin mi?'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
-              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, birlikte')),
-            ],
-          ),
-        );
-        offloadTogether = ans == true;
-      }
-
-      Future<void> offloadOne(QueryDocumentSnapshot<Map<String, dynamic>> d, {required bool linkedFlag}) async {
-        final dd = d.data();
-        final fullName = (dd['fullName'] ?? '').toString();
-        final seat = (dd['seat'] ?? '').toString();
-        await d.reference.set({
-          'status': 'OFFLOADED',
-          'offloadedAt': now,
-          'offloadedByUid': widget.currentUid,
-          'offloadedByEmail': byEmail,
-          'offloadedByUsernameLower': byUsernameLower,
-        }, SetOptions(merge: true));
-
-        await widget.flightRef.collection('offloads').add({
-          'paxId': d.id,
-          'fullName': fullName,
-          'seat': seat,
-          'at': now,
-          'byUid': widget.currentUid,
-          'byEmail': byEmail,
-          'byUsernameLower': byUsernameLower,
-          'meta': {'linkedOffload': linkedFlag},
-        });
-      }
-
-      // Always offload selected
-      await offloadOne(selected, linkedFlag: false);
-
-      // Optionally offload linked pax too
-      if (offloadTogether) {
-        for (final d in linked) {
-          await offloadOne(d, linkedFlag: true);
-        }
-      }
-
-      await _log('PAX_OFFLOADED_MANUAL', meta: {'paxId': selected.id, 'offloadTogether': offloadTogether, 'linkedCount': linked.length});
+      await selected.reference.set({
+        'status': 'OFFLOADED',
+        'offloadedAt': FieldValue.serverTimestamp(),
+        'offloadedByUid': widget.currentUid,
+        'offloadedByEmail': byEmail,
+      }, SetOptions(merge: true));
+      await _log('PAX_OFFLOADED_MANUAL', meta: {'paxId': selected.id});
     } else {
       // Offer PRE vs RANDOM with watchlist rules
       final data = selected.data();
@@ -2437,83 +1632,70 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   Future<void> _inviteUser() async {
-    final ctl = TextEditingController();
+    final meRoleSnap = await Db.userDoc(widget.currentUid).get();
+    final myRole = (meRoleSnap.data()?['role'] ?? 'Agent').toString();
 
+    final fSnap = await widget.flightRef.get();
+    final ownerUid = (fSnap.data()?['ownerUid'] ?? '').toString();
+
+    final canInvite = myRole == 'Supervisor' || ownerUid == widget.currentUid;
+
+    if (!canInvite) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sadece uçuş sahibi veya Supervisor davet gönderebilir.')),
+      );
+      return;
+    }
+
+    final emailC = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Uygulama içi davet'),
+        title: const Text('Kullanıcı Davet Et (Agent)'),
         content: TextField(
-          controller: ctl,
-          decoration: const InputDecoration(
-            labelText: 'Kullanıcı Adı (isim.soyisim)',
-            hintText: 'Örn: volkan.taskiran',
-          ),
+          controller: emailC,
+          decoration: const InputDecoration(labelText: 'Kullanıcı email'),
+          keyboardType: TextInputType.emailAddress,
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Vazgeç'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Davet Et'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Davet Gönder')),
         ],
       ),
     );
 
     if (ok != true) return;
 
-    final usernameLower = ctl.text.trim().toLowerCase();
-    if (usernameLower.isEmpty) return;
+    final inviteeEmail = emailC.text.trim();
+    if (inviteeEmail.isEmpty) return;
 
-    try {
-      // 1) Kullanıcı adından uid bul (email @ öncesi)
-      final q = await Db.users()
-          .where('usernameLower', isEqualTo: usernameLower)
-          .limit(1)
-          .get();
+    final fData = fSnap.data() ?? {};
+    final flightCode = (fData['flightCode'] ?? '').toString();
 
-      if (q.docs.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Kullanıcı bulunamadı. İsim formatını kontrol et.')),
-        );
-        return;
-      }
+    await Db.invites().add({
+      'flightId': widget.flightRef.id,
+      'flightCode': flightCode,
+      'inviteeEmail': inviteeEmail,
+      'status': 'PENDING',
+      'createdAt': FieldValue.serverTimestamp(),
+      'createdByUid': widget.currentUid,
+    });
 
-      final u = q.docs.first;
-      final inviteeUid = u.id;
-      final inviteeName = (u.data()['displayName'] ?? '').toString();
+    await _log('INVITE_SENT', meta: {'inviteeEmail': inviteeEmail});
 
-      // 2) Flight bilgisi (id + code)
-      final flightId = widget.flightRef.id;
-      final flightSnap = await widget.flightRef.get();
-      final flightCode = (flightSnap.data()?['flightCode'] ?? '').toString();
-
-      await FirebaseFirestore.instance.collection('invites').add({
-        'flightId': flightId,
-        'flightCode': flightCode,
-        'inviteeUid': inviteeUid,
-        'inviteeName': inviteeName,
-        'status': 'PENDING',
-        'createdByUid': widget.currentUid,
-        'createdAt': Timestamp.now(),
-      });
-
-      if (!mounted) return;
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Davet gönderildi.')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Davet gönderilemedi: $e')),
       );
     }
   }
 
+  @override
+  void dispose() {
+    _manualScan.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2566,129 +1748,19 @@ class _ScanTabState extends State<ScanTab> {
                   label: const Text('Kullanıcı davet et'),
                 ),
                 const Divider(height: 24),
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Scan Kamera',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                    if (_queuedCount > 0)
-                      Chip(
-                        label: Text('Offline queue: $_queuedCount'),
-                        avatar: const Icon(Icons.cloud_upload, size: 18),
-                      ),
-                  ],
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Scan Kamera Ekranı (placeholder)',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
                 ),
                 const SizedBox(height: 8),
-
-                // Camera scanner on non-web; manual input remains as fallback (and for web).
-                if (!kIsWeb) ...[
-                  SizedBox(
-                    height: 260,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: MobileScanner(
-                        controller: _scannerController,
-                        onDetect: (capture) async {
-                          if (_busy) return;
-                          final barcodes = capture.barcodes;
-                          if (barcodes.isEmpty) return;
-                          final raw = (barcodes.first.rawValue ?? '').trim();
-                          if (raw.isEmpty) return;
-
-                          // Manual trigger: only accept when armed
-                          if (_manualTrigger && !_armed) return;
-
-                          final now = DateTime.now();
-                          if (_lastScanRaw == raw &&
-                              _lastScanAt != null &&
-                              now.difference(_lastScanAt!).inMilliseconds < 350) {
-                            // ignore accidental double-detect
-                            return;
-                          }
-                          _lastScanRaw = raw;
-                          _lastScanAt = now;
-
-                          if (_manualTrigger) {
-                            setState(() => _armed = false);
-                          }
-
-                          setState(() => _busy = true);
-                          try {
-                            await _processScanString(raw);
-                          } catch (e) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text(e.toString())),
-                              );
-                            }
-                          } finally {
-                            if (mounted) setState(() => _busy = false);
-                          }
-                        },
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      IconButton(
-                        tooltip: 'Torch',
-                        onPressed: () async {
-                          await _scannerController.toggleTorch();
-                          setState(() {});
-                        },
-                        icon: Icon(
-                          _scannerController.torchEnabled ? Icons.flash_on : Icons.flash_off,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          value: _manualTrigger,
-                          onChanged: (v) {
-                            setState(() {
-                              _manualTrigger = v;
-                              _armed = !v;
-                            });
-                          },
-                          title: const Text('Tetikleme butonu'),
-                          subtitle: const Text('Kamera otomatik okuyamazsa, tetikle ve 1 kart oku.'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (_manualTrigger) ...[
-                    const SizedBox(height: 6),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _busy
-                            ? null
-                            : () {
-                                setState(() => _armed = true);
-                                // auto-disarm after a short window
-                                Future.delayed(const Duration(seconds: 4), () {
-                                  if (mounted && _manualTrigger) setState(() => _armed = false);
-                                });
-                              },
-                        icon: const Icon(Icons.play_arrow),
-                        label: Text(_armed ? 'TETİKLEME AKTİF' : 'TETİKLE'),
-                      ),
-                    ),
-                  ],
-                  const Divider(height: 24),
-                ] else ...[
-                  const Text(
-                    'Web testte kamera yerine manuel input kullanıyoruz.',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  const Divider(height: 24),
-                ],
-
+                const Text(
+                  'Kamera entegrasyonu sonraki adım (mobile_scanner vb.). Şimdilik manuel scan string ile simüle.',
+                  style: TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: _manualScan,
                   decoration: const InputDecoration(
@@ -2825,23 +1897,10 @@ class _PaxListTabState extends State<PaxListTab> {
 
     return ListTile(
       title: Text(name.isEmpty ? '—' : name),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}'),
-          const SizedBox(height: 2),
-          Text(
-            'Status: ${status == 'DFT_BOARDED' && (data['watchlistMatch'] == true) ? 'DFT Random - Watchlist Matched' : status}',
-            style: TextStyle(
-              color: (status == 'DFT_BOARDED' && (data['watchlistMatch'] == true)) ? Colors.red : null,
-              fontWeight: (status == 'DFT_BOARDED' && (data['watchlistMatch'] == true)) ? FontWeight.w700 : null,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text('Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}'),
-          Text('Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
-        ],
-      ),
+      subtitle: Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}\n'
+          'Status: $status\n'
+          'Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}\n'
+          'Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
       isThreeLine: true,
       trailing: PopupMenuButton<String>(
         onSelected: (v) async {
@@ -2917,7 +1976,6 @@ class _PaxListTabState extends State<PaxListTab> {
         'boardedAt': FieldValue.serverTimestamp(),
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
-        'watchlistMatch': isWl,
       }, SetOptions(merge: true));
       await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': name, 'seat': seat});
     } else {
@@ -2926,7 +1984,6 @@ class _PaxListTabState extends State<PaxListTab> {
         'boardedAt': FieldValue.serverTimestamp(),
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
-        'watchlistMatch': isWl,
       }, SetOptions(merge: true));
       await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': name, 'seat': seat, 'watchlistMatch': isWl});
     }
