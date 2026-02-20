@@ -259,6 +259,13 @@ Future<void> main() async {
   runApp(const GozenBoardingApp());
 }
 
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => const GozenBoardingApp();
+}
+
 class GozenBoardingApp extends StatefulWidget {
   const GozenBoardingApp({super.key});
 
@@ -591,7 +598,6 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ),
         ),
-      ),
     );
   }
 }
@@ -2313,105 +2319,97 @@ class _ScanTabState extends State<ScanTab> {
                 SizedBox(
                   width: double.infinity,
                   child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SwitchListTile(
-                value: _cameraOn,
-                onChanged: (v) => setState(() => _cameraOn = v),
-                title: const Text('Kamera (Scan)'),
-                subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
-              ),
-              if (_cameraOn) ...[
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        MobileScanner(
-                          controller: _scannerController,
-                          onDetect: _onCameraDetect,
-                        ),
-                        Align(
-                          alignment: Alignment.topRight,
-                          child: Padding(
-                            padding: const EdgeInsets.all(8),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SwitchListTile(
+                        value: _cameraOn,
+                        onChanged: (v) => setState(() => _cameraOn = v),
+                        title: const Text('Kamera (Scan)'),
+                        subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
+                      ),
+                      if (_cameraOn) ...[
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: AspectRatio(
+                            aspectRatio: 16 / 9,
+                            child: Stack(
+                              fit: StackFit.expand,
                               children: [
-                                IconButton(
-                                  tooltip: 'Torch',
-                                  onPressed: () async {
-                                    await _scannerController.toggleTorch();
-                                    if (mounted) setState(() => _torchOn = !_torchOn);
-                                  },
-                                  icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                MobileScanner(
+                                  controller: _scannerController,
+                                  onDetect: _onCameraDetect,
+                                ),
+                                Align(
+                                  alignment: Alignment.topRight,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          tooltip: 'Torch',
+                                          onPressed: () async {
+                                            await _scannerController.toggleTorch();
+                                            if (mounted) setState(() => _torchOn = !_torchOn);
+                                          },
+                                          icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
                               ],
                             ),
                           ),
                         ),
+                        const SizedBox(height: 8),
                       ],
-                    ),
+                      if (_lastParsedPreview != null) ...[
+                        Text(
+                          _lastParsedPreview!,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                      TextField(
+                        controller: _manualScan,
+                        decoration: const InputDecoration(
+                          labelText: 'Manuel Scan (FLIGHTCODE|FULLNAME|SEAT|PNR)',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: _busy
+                              ? null
+                              : () async {
+                                  setState(() => _busy = true);
+                                  try {
+                                    await _processScanString(_manualScan.text.trim());
+                                  } catch (e) {
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text(e.toString())),
+                                      );
+                                    }
+                                  } finally {
+                                    if (mounted) setState(() => _busy = false);
+                                  }
+                                },
+                          child: _busy
+                              ? const SizedBox(
+                                  height: 18,
+                                  width: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Text('Scan İşle'),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 8),
-                if (_lastParsedPreview != null)
-                  Text(
-                    _lastParsedPreview!,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-              ],
-            ],
-          )),
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          if (_lastParsedPreview != null) ...[
-            Text(
-              _lastParsedPreview!,
-              style: const TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-          ],
-TextField(
-                  controller: _manualScan,
-                  decoration: const InputDecoration(
-                    labelText: 'Manuel Scan (FLIGHTCODE|FULLNAME|SEAT|PNR)',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _busy
-                        ? null
-                        : () async {
-                            setState(() => _busy = true);
-                            try {
-                              await _processScanString(_manualScan.text.trim());
-                            } catch (e) {
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text(e.toString())),
-                                );
-                              }
-                            } finally {
-                              if (mounted) setState(() => _busy = false);
-                            }
-                          },
-                    child: _busy
-                        ? const SizedBox(
-                            height: 18,
-                            width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Scan İşle'),
-                  ),
-                )
               ],
             ),
           ),
