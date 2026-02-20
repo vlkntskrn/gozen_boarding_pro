@@ -28,104 +28,6 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
-// -----------------------------
-// Flight code helpers (IATA/ICAO tolerant)
-// -----------------------------
-
-class _FlightCodeParts {
-  final String designator; // IATA (2-char) or ICAO (3-char) or alnum (e.g. X3)
-  final String number; // digits
-  const _FlightCodeParts(this.designator, this.number);
-}
-
-// Common ICAO <-> IATA mappings we must accept interchangeably when matching.
-// (Not exhaustive; add as you meet new carriers.)
-const Map<String, String> _icaoToIata = {
-  'EXS': 'LS', // Jet2
-  'TOM': 'BY', // TUI Airways
-  'TFL': 'OR', // TUI fly Netherlands
-  'SXS': 'XQ', // SunExpress
-  'PGT': 'PC', // Pegasus
-  'BAW': 'BA', // British Airways
-  'FHY': 'FH', // Freebird
-};
-
-final Map<String, String> _iataToIcao = {
-  for (final e in _icaoToIata.entries) e.value: e.key,
-};
-
-String _normalizeFlightCode(String raw) {
-  final s = raw.trim().toUpperCase();
-  // Keep only A-Z and 0-9.
-  return s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-}
-
-_FlightCodeParts? _splitFlightCode(String raw) {
-  final s = _normalizeFlightCode(raw);
-  final m = RegExp(r'^([A-Z0-9]{2,3})([0-9]{1,4})$').firstMatch(s);
-  if (m == null) return null;
-  final designator = m.group(1)!;
-  var number = m.group(2)!;
-  // Normalize leading zeros: 0057 -> 57 (keeps at least 1 digit)
-  number = number.replaceFirst(RegExp(r'^0+(?=[0-9])'), '');
-  return _FlightCodeParts(designator, number);
-}
-
-bool _flightCodesEquivalent(String a, String b) {
-  final pa = _splitFlightCode(a);
-  final pb = _splitFlightCode(b);
-  if (pa == null || pb == null) return false;
-  if (pa.number != pb.number) return false;
-
-  if (pa.designator == pb.designator) return true;
-
-  // Accept ICAO<->IATA equivalence.
-  final aAsIata = _icaoToIata[pa.designator] ?? pa.designator;
-  final bAsIata = _icaoToIata[pb.designator] ?? pb.designator;
-  if (aAsIata == bAsIata) return true;
-
-  // Also accept reverse direction explicitly.
-  final aAsIcao = _iataToIcao[pa.designator] ?? pa.designator;
-  final bAsIcao = _iataToIcao[pb.designator] ?? pb.designator;
-  return aAsIcao == bAsIcao;
-}
-
-String? _extractFlightCodeFromScanPayload(String raw) {
-  final s = raw.trim();
-  if (s.isEmpty) return null;
-
-  // 1) Legacy pipe format: ...|FLIGHT=LS1850|...
-  if (s.contains('|')) {
-    final parts = s.split('|');
-    for (final p in parts) {
-      final kv = p.split('=');
-      if (kv.length == 2 && kv[0].trim().toUpperCase() == 'FLIGHT') {
-        final candidate = kv[1].trim();
-        if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
-      }
-    }
-  }
-
-  // 2) IATA BCBP (PDF417/Aztec/QR) payload often starts with 'M' and is fixed-width.
-  //    Carrier field length is 3 (often 'LS '), flight number is 4.
-  final bcbp = s.replaceAll('\n', '').replaceAll('\r', '');
-  if (RegExp(r'^[Mm]').hasMatch(bcbp) && bcbp.length >= 42) {
-    // 0-based indices derived from IATA BCBP fixed field positions.
-    final carrier = bcbp.substring(35, 38).trim();
-    final fno = bcbp.substring(38, 42).trim();
-    final candidate = '$carrier$fno';
-    if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
-  }
-
-  // 3) Loose regex fallback (OCR text etc.)
-  final m = RegExp(r'([A-Z0-9]{2,3})[ ]*([0-9]{1,4})', caseSensitive: false).firstMatch(s);
-  if (m != null) {
-    final candidate = '${m.group(1)!}${m.group(2)!}';
-    if (_splitFlightCode(candidate) != null) return _normalizeFlightCode(candidate);
-  }
-  return null;
-}
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
@@ -890,9 +792,9 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
   }
 
   bool _isValidFlightCode(String v) {
-    // Accept IATA (2 alnum), ICAO (3 alnum), and allow spaces/dashes.
-    // Examples: LS1850, BA2245, TOM857, X3 117, U2 123
-    return _splitFlightCode(v) != null;
+    // Examples: LS976, BA2245
+    final re = RegExp(r'^[A-Z]{2}\d{3,4}$');
+    return re.hasMatch(v.toUpperCase());
   }
 
   Future<void> _addPaxDialog() async {
@@ -964,8 +866,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     });
 
     try {
-      final codeRaw = _flightCode.text.trim();
-      final code = _normalizeFlightCode(codeRaw);
+      final code = _flightCode.text.trim().toUpperCase();
       if (!_isValidFlightCode(code)) {
         throw Exception('Uçuş kodu formatı hatalı. Örn: LS976 / BA2245');
       }
@@ -978,7 +879,6 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
       await Db.fs.runTransaction((tx) async {
         tx.set(flightRef, {
           'flightCode': code,
-          'flightCodeRaw': codeRaw,
           'bookedPax': booked,
           'ownerUid': widget.uid,
           'participants': <String>[],
@@ -1289,7 +1189,164 @@ class _ScanTabState extends State<ScanTab> {
   final _manualScan = TextEditingController();
   bool _busy = false;
 
-  @override
+  
+  // --- Flight code normalization & matching (IATA/ICAO tolerant) ---
+  static const Map<String, String> _icaoToIata = {
+    // Jet2
+    'EXS': 'LS',
+    // British Airways
+    'BAW': 'BA',
+    // TUI group / partners
+    'TFL': 'OR', // TUI fly Netherlands
+    'TUI': 'X3', // TUIfly (Germany)
+    'TOM': 'BY', // TUI Airways (historical; many boarding passes show TOM)
+    // SunExpress
+    'SXS': 'XQ',
+    // Freebird Airlines
+    'FHY': 'FH',
+  };
+
+  static const Map<String, String> _iataToIcao = {
+    'LS': 'EXS',
+    'BA': 'BAW',
+    'OR': 'TFL',
+    'X3': 'TUI',
+    'BY': 'TOM',
+    'XQ': 'SXS',
+    'FH': 'FHY',
+  };
+
+  String _normalizeFlightCode(String input) {
+    final s = input.trim().toUpperCase();
+    if (s.isEmpty) return '';
+    // Remove everything except letters/digits.
+    final cleaned = s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    // Accept 1-3 alnum prefix + 1-5 digits + optional suffix letter.
+    final m = RegExp(r'^([A-Z0-9]{1,3})(0*)([0-9]{1,5})([A-Z]?)$').firstMatch(cleaned);
+    if (m == null) return cleaned;
+
+    final prefix = m.group(1)!;
+    final digits = m.group(3)!;
+    final suffix = (m.group(4) ?? '').trim();
+    final digitsNoLeading = digits.replaceFirst(RegExp(r'^0+'), '');
+    final numPart = digitsNoLeading.isEmpty ? '0' : digitsNoLeading;
+    return '$prefix$numPart$suffix';
+  }
+
+  Set<String> _flightCodeAlternatives(String code) {
+    final n = _normalizeFlightCode(code);
+    if (n.isEmpty) return <String>{};
+
+    final m = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})([A-Z]?)$').firstMatch(n);
+    if (m == null) return <String>{n};
+
+    final pref = m.group(1)!;
+    final num = m.group(2)!;
+    final suf = (m.group(3) ?? '').trim();
+
+    final out = <String>{n};
+
+    // If given as ICAO (3), add IATA alt.
+    if (pref.length == 3 && _icaoToIata.containsKey(pref)) {
+      out.add('${_icaoToIata[pref]}$num$suf');
+    }
+
+    // If given as IATA, add ICAO alt.
+    if (_iataToIcao.containsKey(pref)) {
+      out.add('${_iataToIcao[pref]}$num$suf');
+    }
+
+    // Also accept with zero-padded 5-digit flight (common in BCBP).
+    final num5 = num.padLeft(5, '0');
+    out.add('$pref$num5$suf');
+    if (_iataToIcao.containsKey(pref)) out.add('${_iataToIcao[pref]}$num5$suf');
+    if (pref.length == 3 && _icaoToIata.containsKey(pref)) out.add('${_icaoToIata[pref]}$num5$suf');
+
+    return out;
+  }
+
+  bool _flightCodeMatches(String expected, String scanned) {
+    final a = _flightCodeAlternatives(expected);
+    final b = _flightCodeAlternatives(scanned);
+    return a.intersection(b).isNotEmpty;
+  }
+
+  Map<String, String> _parseScanPayload(String raw) {
+    final r = raw.trim();
+    if (r.isEmpty) return {};
+
+    // 1) Our custom payload: FLIGHT|NAME|SEAT|PNR (legacy)
+    if (r.contains('|')) {
+      final parts = r.split('|').map((e) => e.trim()).toList();
+      if (parts.isNotEmpty) {
+        return {
+          'flightCode': parts.isNotEmpty ? parts[0] : '',
+          'fullName': parts.length > 1 ? parts[1] : '',
+          'seat': parts.length > 2 ? parts[2] : '',
+          'pnr': parts.length > 3 ? parts[3] : '',
+        };
+      }
+    }
+
+    // 2) IATA BCBP (PDF417/QR payload) – minimal fixed-position parse
+    // We only need: passenger name, flight designator, seat, PNR.
+    // Reference layout: 1(format) + 1(legs) + 20(name) + 1(ETKT) + 7(PNR) ... then per-leg fields.
+    final up = r.toUpperCase();
+    if (up.length >= 52 && (up.startsWith('M') || up.startsWith('S'))) {
+      try {
+        final name = up.substring(2, 22).trim();
+        final pnr = up.substring(23, 30).trim();
+
+        final carrier3 = up.substring(36, 39).trim();
+        final flight5 = up.substring(39, 44).trim(); // often 5 incl leading zeros
+        final seat4 = up.substring(48, 52).trim();
+
+        final flightNum = flight5.replaceFirst(RegExp(r'^0+'), '');
+        final seatNorm = seat4.replaceAll(' ', '').replaceFirst(RegExp(r'^0+'), '').replaceAll('-', '');
+
+        // Prefer IATA if mapping exists, but keep ICAO tolerant matching anyway.
+        final carrier2 = _icaoToIata[carrier3] ?? carrier3;
+
+        return {
+          'flightCode': '$carrier2$flightNum',
+          'fullName': name,
+          'seat': seatNorm,
+          'pnr': pnr,
+          'flightCodeRaw': '$carrier3$flightNum', // helpful for diagnostics
+        };
+      } catch (_) {
+        // fall through
+      }
+    }
+
+    // 3) Fallback: try to extract flight code + seat from plain text
+    final fc = _extractFlightCodeLoose(r);
+    final seat = _extractSeatLoose(r);
+    return {
+      'flightCode': fc,
+      'fullName': '',
+      'seat': seat,
+      'pnr': '',
+    };
+  }
+
+  String _extractFlightCodeLoose(String text) {
+    final up = text.toUpperCase();
+    // Match patterns like "LS 1850", "BA679", "TOM 836", "XQ0688"
+    final m = RegExp(r'\b([A-Z0-9]{1,3})\s*0*([0-9]{1,5})\s*([A-Z]?)\b').firstMatch(up);
+    if (m == null) return '';
+    return _normalizeFlightCode('${m.group(1)}${m.group(2)}${m.group(3) ?? ''}');
+  }
+
+  String _extractSeatLoose(String text) {
+    final up = text.toUpperCase();
+    // 03-C / 32F / 11E
+    final m = RegExp(r'\b([0-9]{1,2})\s*[-]?\s*([A-Z])\b').firstMatch(up);
+    if (m == null) return '';
+    return '${m.group(1)}${m.group(2)}';
+  }
+
+@override
   void initState() {
     super.initState();
     _loadOffline();
@@ -1378,57 +1435,36 @@ class _ScanTabState extends State<ScanTab> {
     );
   }
 
-  // Accept multiple scan payload formats:
-  // - Manual: FLIGHTCODE|FULLNAME|SEAT|PNR
-  // - IATA BCBP barcode (PDF417/Aztec/QR) raw payload
-  // - OCR text fallback (best-effort)
+  // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw) async {
-    String? fullName;
-    String? seat;
-    String? pnr;
-
-    // Extract flight code from the payload.
-    final scanFlight = _extractFlightCodeFromScanPayload(raw);
-    if (scanFlight == null) {
-      throw Exception('Biniş kartı içinden uçuş kodu okunamadı.');
+    final parsed = _parseScanPayload(raw);
+    if (parsed.isEmpty) {
+      throw Exception('Scan verisi boş / anlaşılamadı.');
     }
 
-    // 1) Manual format: FLIGHTCODE|FULLNAME|SEAT|PNR
-    if (raw.contains('|')) {
-      final parts = raw.split('|').map((e) => e.trim()).toList();
-      if (parts.length >= 3) {
-        fullName = parts[1];
-        seat = parts[2];
-        pnr = parts.length >= 4 ? parts[3] : '';
-      }
-    }
+    final flightCode = (parsed['flightCode'] ?? '').toString().trim().toUpperCase();
+    final flightCodeRaw = (parsed['flightCodeRaw'] ?? '').toString().trim().toUpperCase();
+    final fullName = (parsed['fullName'] ?? '').toString().trim();
+    final seat = (parsed['seat'] ?? '').toString().trim().toUpperCase();
+    final pnr = (parsed['pnr'] ?? '').toString().trim().toUpperCase();
 
-    // 2) BCBP fixed width (if manual parsing didn't provide fields)
-    if ((fullName == null || seat == null) && RegExp(r'^[Mm]').hasMatch(raw.trim())) {
-      final bcbp = raw.replaceAll('\n', '').replaceAll('\r', '');
-      if (bcbp.length >= 56) {
-        fullName ??= bcbp.substring(1, 21).trim();
-        pnr ??= bcbp.substring(22, 29).trim();
-        seat ??= bcbp.substring(46, 50).trim();
-      }
+    if (flightCode.isEmpty && flightCodeRaw.isEmpty) {
+      throw Exception('Uçuş kodu okunamadı.');
     }
-
-    fullName ??= 'UNKNOWN';
-    seat ??= 'NA';
-    pnr ??= '';
 
     final fSnap = await widget.flightRef.get();
-    final selectedCode = (fSnap.data()?['flightCode'] ?? '').toString();
-    final selectedRaw = (fSnap.data()?['flightCodeRaw'] ?? '').toString();
+    final fCode = (fSnap.data()?['flightCode'] ?? '').toString();
 
-    // Flexible match: ignore spaces/punct, accept IATA<->ICAO mappings.
-    if (!_flightCodesEquivalent(selectedCode, scanFlight) &&
-        !_flightCodesEquivalent(selectedRaw, scanFlight)) {
-      throw Exception(
-          'Uçuş kodu eşleşmedi. Beklenen: ${_normalizeFlightCode(selectedCode)}');
+    final ok = _flightCodeMatches(fCode, flightCode) ||
+        (flightCodeRaw.isNotEmpty && _flightCodeMatches(fCode, flightCodeRaw));
+
+    if (!ok) {
+      final exp = _normalizeFlightCode(fCode);
+      final got = _normalizeFlightCode(flightCode.isNotEmpty ? flightCode : flightCodeRaw);
+      throw Exception('Uçuş kodu eşleşmedi. Beklenen: $exp / Okunan: $got');
     }
 
-    // Offer Pre-BOARD vs DFT Random
+// Offer Pre-BOARD vs DFT Random
     final isWl = await _isWatchlistMatch(fullName);
 
     final choice = await showDialog<String>(
@@ -1722,6 +1758,30 @@ class _ScanTabState extends State<ScanTab> {
                   title: const Text('Gece Modu (bu sekme içi)'),
                 ),
                 const Divider(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Kamera ile Tara'),
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            final raw = await Navigator.of(context).push<String>(
+                              MaterialPageRoute(builder: (_) => const BoardingPassScannerPage()),
+                            );
+                            if (raw != null && raw.trim().isNotEmpty) {
+                              _manualScan.text = raw.trim();
+                              if (mounted) setState(() => _busy = true);
+                              try {
+                                await _processScanString(raw.trim());
+                              } finally {
+                                if (mounted) setState(() => _busy = false);
+                              }
+                            }
+                          },
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -2667,5 +2727,94 @@ class ListToCsvConverter {
     var out = v.replaceAll('"', '""');
     if (needs) out = '"$out"';
     return out;
+  }
+}
+
+
+// Full-screen camera scanner for boarding pass barcodes (PDF417 / QR / Aztec).
+class BoardingPassScannerPage extends StatefulWidget {
+  final String title;
+  const BoardingPassScannerPage({super.key, this.title = 'Biniş Kartı Tara'});
+
+  @override
+  State<BoardingPassScannerPage> createState() => _BoardingPassScannerPageState();
+}
+
+class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
+  late final MobileScannerController _controller;
+
+  bool _popped = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = MobileScannerController(
+      // We want 1 clean read; mobile_scanner will manage camera/permission prompts.
+      detectionSpeed: DetectionSpeed.normal,
+      formats: const [
+        BarcodeFormat.qrCode,
+        BarcodeFormat.aztec,
+        BarcodeFormat.pdf417,
+        BarcodeFormat.dataMatrix,
+        BarcodeFormat.code128,
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) async {
+    if (_popped) return;
+    for (final b in capture.barcodes) {
+      final raw = b.rawValue;
+      if (raw != null && raw.trim().isNotEmpty) {
+        _popped = true;
+        try {
+          await _controller.stop();
+        } catch (_) {}
+        if (mounted) Navigator.of(context).pop(raw.trim());
+        return;
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          IconButton(
+            tooltip: 'Flaş',
+            onPressed: () => _controller.toggleTorch(),
+            icon: const Icon(Icons.flash_on),
+          ),
+          IconButton(
+            tooltip: 'Kamera değiştir',
+            onPressed: () => _controller.switchCamera(),
+            icon: const Icon(Icons.cameraswitch),
+          ),
+        ],
+      ),
+      body: MobileScanner(
+        controller: _controller,
+        onDetect: _onDetect,
+        errorBuilder: (context, error, child) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Kamera açılamadı: ${error.errorDetails?.message ?? error.toString()}',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 }
