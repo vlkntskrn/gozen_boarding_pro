@@ -2172,8 +2172,9 @@ class _ScanTabState extends State<ScanTab> {
 
   Future<void> _alertVibrate([int count = 2]) async {
     for (var i = 0; i < count; i++) {
-      await HapticFeedback.heavyImpact();
-      await Future.delayed(const Duration(milliseconds: 90));
+      try { await HapticFeedback.vibrate(); } catch (_) {}
+      try { await HapticFeedback.heavyImpact(); } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 110));
     }
   }
 
@@ -2277,6 +2278,9 @@ class _ScanTabState extends State<ScanTab> {
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw) async {
     final fSnap0 = await widget.flightRef.get();
+    if ((fSnap0.data()?['closed'] ?? false) == true) {
+      throw Exception('Uçuş kapatılmış. Scan devre dışı.');
+    }
     final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
     final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
     if (parsed.isEmpty) {
@@ -2694,126 +2698,192 @@ class _ScanTabState extends State<ScanTab> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: widget.flightRef.snapshots(),
+      builder: (context, flightSnap) {
+        final fData = flightSnap.data?.data() ?? <String, dynamic>{};
+        final isClosed = (fData['closed'] ?? false) == true;
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: widget.flightRef.collection('pax').snapshots(),
+          builder: (context, paxSnap) {
+            final paxDocs = paxSnap.data?.docs ?? const [];
+            final booked = paxDocs.length;
+            final dft = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'DFT_BOARDED').length;
+            final pre = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'PREBOARDED').length;
+            final pctBooked = booked == 0 ? 0.0 : (dft * 100.0 / booked);
+            final boardedTotal = pre + dft;
+            final pctBoarded = boardedTotal == 0 ? 0.0 : (dft * 100.0 / boardedTotal);
+
+            return ListView(
+              padding: const EdgeInsets.all(16),
               children: [
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _inviteUser,
-                    icon: const Icon(Icons.person_add_alt_1),
-                    label: const Text('Kullanıcı Davet Et (max 7)'),
-                  ),
-                ),
-                const Divider(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      SwitchListTile(
-                        value: _cameraOn,
-                        onChanged: (v) => setState(() => _cameraOn = v),
-                        title: const Text('Kamera (Scan)'),
-                        subtitle: const Text('Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
-                      ),
-                      if (_cameraOn) ...[
-                        const SizedBox(height: 8),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
-                          child: AspectRatio(
-                            aspectRatio: 16 / 9,
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                MobileScanner(
-                                  controller: _scannerController,
-                                  onDetect: _onCameraDetect,
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _inviteUser,
+                            icon: const Icon(Icons.person_add_alt_1),
+                            label: const Text('Kullanıcı Davet Et (max 7)'),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _GlassPanel(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('DFT / Booked Pax', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 4),
+                                    Text('%${pctBooked.toStringAsFixed(1)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                                    Text('$dft / $booked', style: const TextStyle(fontSize: 11)),
+                                  ],
                                 ),
-                                Align(
-                                  alignment: Alignment.topRight,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _GlassPanel(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('DFT / (Pre+DFT)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 4),
+                                    Text('%${pctBoarded.toStringAsFixed(1)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                                    Text('$dft / $boardedTotal', style: const TextStyle(fontSize: 11)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              SwitchListTile(
+                                value: isClosed ? false : _cameraOn,
+                                onChanged: isClosed ? null : (v) => setState(() => _cameraOn = v),
+                                title: Text(isClosed ? 'Kamera (Scan) • KAPALI UÇUŞ' : 'Kamera (Scan)'),
+                                subtitle: Text(isClosed
+                                    ? 'Uçuş kapatıldığı için kamera ve scan işlemleri devre dışı.'
+                                    : 'Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
+                              ),
+                              if (isClosed)
+                                const Padding(
+                                  padding: EdgeInsets.only(bottom: 8),
+                                  child: _GlassPanel(
+                                    padding: EdgeInsets.all(10),
+                                    child: Text(
+                                      'Bu uçuş kapatılmıştır. Scan/boarding işlemi yapılamaz.',
+                                      style: TextStyle(fontWeight: FontWeight.w700),
+                                    ),
+                                  ),
+                                ),
+                              if (!isClosed && _cameraOn) ...[
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(16),
+                                  child: AspectRatio(
+                                    aspectRatio: 16 / 9,
+                                    child: Stack(
+                                      fit: StackFit.expand,
                                       children: [
-                                        IconButton(
-                                          tooltip: 'Torch',
-                                          onPressed: () async {
-                                            await _scannerController.toggleTorch();
-                                            if (mounted) setState(() => _torchOn = !_torchOn);
-                                          },
-                                          icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                        MobileScanner(
+                                          controller: _scannerController,
+                                          onDetect: _onCameraDetect,
+                                        ),
+                                        Align(
+                                          alignment: Alignment.topRight,
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(8),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: 'Torch',
+                                                  onPressed: () async {
+                                                    await _scannerController.toggleTorch();
+                                                    if (mounted) setState(() => _torchOn = !_torchOn);
+                                                  },
+                                                  icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
                                         ),
                                       ],
                                     ),
                                   ),
                                 ),
+                                const SizedBox(height: 8),
                               ],
-                            ),
+                              if (_lastParsedPreview != null) ...[
+                                Text(_lastParsedPreview!, style: const TextStyle(fontSize: 12)),
+                                const SizedBox(height: 8),
+                              ],
+                              TextField(
+                                controller: _manualScan,
+                                enabled: !isClosed,
+                                decoration: const InputDecoration(
+                                  labelText: 'Manuel Scan (FLIGHTCODE|FULLNAME|SEAT|PNR)',
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  onPressed: (_busy || isClosed)
+                                      ? null
+                                      : () async {
+                                          setState(() => _busy = true);
+                                          try {
+                                            await _processScanString(_manualScan.text.trim());
+                                          } catch (e) {
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(e.toString())),
+                                              );
+                                            }
+                                          } finally {
+                                            if (mounted) setState(() => _busy = false);
+                                          }
+                                        },
+                                  child: _busy
+                                      ? const SizedBox(
+                                          height: 18,
+                                          width: 18,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Text('Scan İşle'),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 8),
                       ],
-                      if (_lastParsedPreview != null) ...[
-                        Text(
-                          _lastParsedPreview!,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        const SizedBox(height: 8),
-                      ],
-                      TextField(
-                        controller: _manualScan,
-                        decoration: const InputDecoration(
-                          labelText: 'Manuel Scan (FLIGHTCODE|FULLNAME|SEAT|PNR)',
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
-                          onPressed: _busy
-                              ? null
-                              : () async {
-                                  setState(() => _busy = true);
-                                  try {
-                                    await _processScanString(_manualScan.text.trim());
-                                  } catch (e) {
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text(e.toString())),
-                                      );
-                                    }
-                                  } finally {
-                                    if (mounted) setState(() => _busy = false);
-                                  }
-                                },
-                          child: _busy
-                              ? const SizedBox(
-                                  height: 18,
-                                  width: 18,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                )
-                              : const Text('Scan İşle'),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ],
-            ),
-          ),
-        ),
-      ],
+            );
+          },
+        );
+      },
     );
   }
-}
 
+
+}
 // ==========================
 // Tab 2: Pax list (Preboard + DFT boarded + search) + Offloaded separate
 // ==========================
@@ -2907,12 +2977,20 @@ class _PaxListTabState extends State<PaxListTab> {
 
     return ListTile(
       title: Text(name.isEmpty ? '—' : name),
-      subtitle: Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}\n'
-          'Status: $status\n'
-          'Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}\n'
-          '${manualBoardedBy.isNotEmpty ? "Manually boarded by: $manualBoardedBy\\n" : ""}'
-          'Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
-      isThreeLine: true,
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}'),
+          Text('Status: $status'),
+          Text('Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}'),
+          if (manualBoardedBy.isNotEmpty)
+            Text('Manual boarding: EVET  •  Manually boarded by: $manualBoardedBy',
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+          Text('Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
+        ],
+      ),
+      isThreeLine: false,
       trailing: PopupMenuButton<String>(
         onSelected: (v) async {
           if (v == 'BOARD') {
@@ -3596,39 +3674,172 @@ class _OpTimesTabState extends State<OpTimesTab> {
     return labels[key] ?? key;
   }
 
+
+  Future<String> _emailOf(String uid) async {
+    final s = await Db.userDoc(uid).get();
+    return (s.data()?['email'] ?? '').toString();
+  }
+
+  Future<String> _etdText() async {
+    final s = await widget.flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
+  Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
+    await widget.flightRef.collection('logs').add({
+      'type': type,
+      'byUid': widget.currentUid,
+      'byEmail': await _emailOf(widget.currentUid),
+      'at': FieldValue.serverTimestamp(),
+      'meta': {...?meta, 'etdDate': await _etdText()},
+    });
+  }
+
+  Future<bool> _canManageClosedFlight() async {
+    final me = await Db.userDoc(widget.currentUid).get();
+    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final f = await widget.flightRef.get();
+    final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
+    return widget.currentUid == ownerUid || role == 'Supervisor' || role == 'Admin';
+  }
+
+  String _fmtTs(dynamic ts) {
+    if (ts is Timestamp) return DateFormat('yyyy-MM-dd HH:mm:ss').format(ts.toDate());
+    return '';
+  }
+
+  Future<File> _buildCsvFile() async {
+    final flightSnap = await widget.flightRef.get();
+    final flight = flightSnap.data() ?? {};
+    final flightCode = (flight['flightCode'] ?? 'FLIGHT').toString();
+
+    final paxSnap = await widget.flightRef.collection('pax').orderBy('fullName').get();
+    final rows = <List<String>>[];
+    rows.add(['FULL_NAME','PNR','SEAT','STATUS','BOARDING_TIME','BOARDED_BY','MANUAL_BOARDED_BY','OFFLOADED_TIME','OFFLOADED_BY']);
+    for (final d in paxSnap.docs) {
+      final data = d.data();
+      rows.add([
+        (data['fullName'] ?? '').toString(),
+        (data['pnr'] ?? '').toString(),
+        (data['seat'] ?? '').toString(),
+        (data['status'] ?? 'NONE').toString(),
+        _fmtTs(data['boardedAt']),
+        (data['boardedByEmail'] ?? '').toString(),
+        (data['manualBoardedByEmail'] ?? '').toString(),
+        _fmtTs(data['offloadedAt']),
+        (data['offloadedByEmail'] ?? '').toString(),
+      ]);
+    }
+
+    rows.add([]);
+    rows.add(['LOGS']);
+    rows.add(['TYPE','AT','BY','META_JSON']);
+    final logSnap = await widget.flightRef.collection('logs').orderBy('at').get();
+    for (final l in logSnap.docs) {
+      final ld = l.data();
+      rows.add([
+        (ld['type'] ?? '').toString(),
+        _fmtTs(ld['at']),
+        (ld['byEmail'] ?? '').toString(),
+        jsonEncode(ld['meta'] ?? const {}),
+      ]);
+    }
+
+    final csv = const ListToCsvConverter().convert(rows);
+    final dir = await getTemporaryDirectory();
+    final safeCode = flightCode.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final file = File('${dir.path}/GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
+    await file.writeAsString('\uFEFF$csv', encoding: utf8);
+    return file;
+  }
+
+  Future<void> _shareFinalReportAndCloseScreen() async {
+    final file = await _buildCsvFile();
+    await _log('REPORT_EXPORTED_AUTO_ON_OPERATION_FINISHED', meta: {'path': file.path});
+    await Share.shareXFiles([XFile(file.path)], text: 'GOZEN Boarding Final Report');
+    if (!mounted) return;
+    Navigator.of(context).pop(); // return to flight list (closed flights tab available)
+  }
+
   Future<void> _setFieldWithRules(String key, DateTime? value) async {
-    if (key == 'OPERATION_FINISHED' && value != null) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('Uçuşu Kapat'),
-          content: const Text('Operation FINISHED verisi girildi. Uçuş kapatılacaktır, emin misiniz?'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
-            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, Kapat')),
-          ],
-        ),
-      );
-      if (ok != true) return;
+    final snapBefore = await widget.flightRef.get();
+    final dataBefore = snapBefore.data() ?? {};
+    final wasClosed = (dataBefore['closed'] ?? false) == true;
+
+    if (key == 'OPERATION_FINISHED') {
+      if (value != null) {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Uçuşu Kapat'),
+            content: const Text('Operation FINISHED verisi girildi. Rapor paylaşımı açılacak ve uçuş kapatılacaktır, emin misiniz?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, Kapat')),
+            ],
+          ),
+        );
+        if (ok != true) return;
+      } else if (wasClosed) {
+        final canReopen = await _canManageClosedFlight();
+        if (!canReopen) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Kapatılan uçuşu tekrar açma yetkisi sadece uçuş sahibi, Supervisor veya Admin’dedir.')),
+            );
+          }
+          return;
+        }
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Uçuşu Tekrar Aç'),
+            content: const Text('Operation FINISHED silinirse uçuş tekrar aktif uçuşlara döner. Emin misiniz?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, Aç')),
+            ],
+          ),
+        );
+        if (ok != true) return;
+      }
     }
 
     final map = await _load();
     map[key] = value?.toIso8601String();
 
     final payload = <String, dynamic>{'opTimes': map};
+
     if (key == 'OPERATION_FINISHED' && value != null) {
       payload['closed'] = true;
       payload['closedAt'] = FieldValue.serverTimestamp();
       payload['closedByUid'] = widget.currentUid;
     }
+    if (key == 'OPERATION_FINISHED' && value == null && wasClosed) {
+      payload['closed'] = false;
+      payload['closedAt'] = FieldValue.delete();
+      payload['closedByUid'] = FieldValue.delete();
+    }
 
     await widget.flightRef.set(payload, SetOptions(merge: true));
 
-    if (!mounted) return;
     if (key == 'OPERATION_FINISHED' && value != null) {
+      await _log('FLIGHT_CLOSED_OPERATION_FINISHED', meta: {'opFinished': value.toIso8601String()});
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Uçuş kapatıldı. Kapatılmış uçuşlar sekmesinde 24 saat görünür.')),
+        const SnackBar(content: Text('Rapor paylaşım ekranı açılıyor. Paylaşım sonrası uçuş ekranı kapanacak.')),
       );
+      await _shareFinalReportAndCloseScreen();
+      return;
+    }
+
+    if (key == 'OPERATION_FINISHED' && value == null && wasClosed) {
+      await _log('FLIGHT_REOPENED_BY_OPERATION_FINISHED_CLEAR', meta: {'reason': 'manual_clear'});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Uçuş tekrar aktif hale getirildi.')),
+      );
+      return;
     }
   }
 
@@ -3783,6 +3994,7 @@ class _ReportTabState extends State<ReportTab> {
       'BOARDING_TIME',
       'BOARDED_BY',
       'OFFLOADED_TIME',
+      'MANUAL_BOARDED_BY',
       'OFFLOADED_BY',
     ]);
 
@@ -3800,6 +4012,7 @@ class _ReportTabState extends State<ReportTab> {
         status,
         _fmtTs(data['boardedAt']),
         (data['boardedByEmail'] ?? '').toString(),
+        (data['manualBoardedByEmail'] ?? '').toString(),
         _fmtTs(data['offloadedAt']),
         (data['offloadedByEmail'] ?? '').toString(),
       ]);
