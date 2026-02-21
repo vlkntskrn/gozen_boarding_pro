@@ -2043,6 +2043,37 @@ class _ScanTabState extends State<ScanTab> {
       }
     }
 
+    // Expected-flight recovery heuristic (helps noisy PDF417 reads like LS00185 vs LS1850)
+    if (best.isNotEmpty && expected.isNotEmpty && !_flightCodeMatches(expected, best)) {
+      final exp = _normalizeFlightCode(expected);
+      final reCode = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})$');
+      final me = reCode.firstMatch(exp);
+      final mb = reCode.firstMatch(best);
+      if (me != null && mb != null) {
+        final expCarrier = me.group(1) ?? '';
+        final expNum = me.group(2) ?? '';
+        final gotCarrier = mb.group(1) ?? '';
+        final gotNumRaw = mb.group(2) ?? '';
+        final gotNum = gotNumRaw.replaceFirst(RegExp(r'^0+'), '');
+        if (expCarrier == gotCarrier || _flightCodeMatches(expCarrier, gotCarrier)) {
+          final expNumNo0 = expNum.replaceFirst(RegExp(r'^0+'), '');
+          final prefixClose =
+              (expNum.startsWith(gotNum) || expNumNo0.startsWith(gotNum)) &&
+              (expNum.length - gotNum.length).abs() <= 1 &&
+              gotNum.length >= 3;
+          final suffixClose =
+              (gotNum.endsWith(expNum) || gotNum.endsWith(expNumNo0)) &&
+              (gotNum.length - expNum.length).abs() <= 1 &&
+              expNum.length >= 3;
+          final distClose = _levenshtein(expNum, gotNum.padLeft(expNum.length, '0')) <= 1 ||
+              _levenshtein(expNum, gotNum) <= 1;
+          if (prefixClose || suffixClose || distClose) {
+            return exp;
+          }
+        }
+      }
+    }
+
     if (best.isNotEmpty) return best;
 
     final cleaned = up.replaceAll(RegExp(r'[^A-Z0-9]'), ' ');
