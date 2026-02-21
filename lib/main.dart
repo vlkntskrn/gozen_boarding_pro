@@ -338,55 +338,23 @@ class AuthGate extends StatelessWidget {
 class _Splash extends StatelessWidget {
   const _Splash();
 
-  static const String _logoAssetPath = 'assets/company_logo.png';
-
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       body: Center(
         child: _GlassPanel(
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Container(
-                  width: 84,
-                  height: 84,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: cs.outline.withOpacity(.18)),
-                  ),
-                  child: Image.asset(
-                    _logoAssetPath,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) => Icon(
-                      Icons.local_airport_rounded,
-                      size: 38,
-                      color: cs.primary,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
+            children: const [
+              Icon(Icons.local_airport_rounded, size: 38),
+              SizedBox(height: 10),
+              Text(
                 'GOZEN BOARDING PRO',
                 style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: .6),
               ),
-              const SizedBox(height: 4),
-              Text(
-                'Crew Operations',
-                style: TextStyle(
-                  fontSize: 12,
-                  letterSpacing: .35,
-                  color: cs.onSurface.withOpacity(.70),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 12),
-              const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(height: 12),
+              SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
             ],
           ),
         ),
@@ -4592,10 +4560,32 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
 
   bool _popped = false;
 
+  double _zoom = 0.0;
+
   @override
   void initState() {
     super.initState();
-    _controller = MobileScannerController();
+    _controller = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      formats: const [
+        BarcodeFormat.pdf417, // En yaygın boarding pass barkodu
+        BarcodeFormat.aztec,
+        BarcodeFormat.qrCode,
+        BarcodeFormat.dataMatrix,
+        BarcodeFormat.code128,
+        BarcodeFormat.code39,
+      ],
+      // PDF417 için daha stabil sonuç verebiliyor.
+      cameraResolution: const Size(1920, 1080),
+    );
+  }
+
+  Future<void> _setZoom(double value) async {
+    final z = value.clamp(0.0, 1.0);
+    setState(() => _zoom = z);
+    try {
+      await _controller.setZoomScale(z);
+    } catch (_) {}
   }
 
   @override
@@ -4637,76 +4627,132 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
           ),
         ],
       ),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          MobileScanner(
-            controller: _controller,
-            onDetect: _onDetect,
-            errorBuilder: (context, error, child) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    'Kamera açılamadı: ${error.errorDetails?.message ?? error.toString()}',
-                    textAlign: TextAlign.center,
+      body: LayoutBuilder(
+        builder: (context, c) {
+          final double w = c.maxWidth;
+          final double h = c.maxHeight;
+          // Dikey PDF417 barkodlar için daha geniş/tall alan.
+          final Rect scanRect = Rect.fromCenter(
+            center: Offset(w / 2, h * 0.46),
+            width: w * 0.90,
+            height: h * 0.62,
+          );
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              MobileScanner(
+                controller: _controller,
+                scanWindow: scanRect,
+                onDetect: _onDetect,
+                errorBuilder: (context, error, child) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        'Kamera açılamadı: ${error.errorDetails?.message ?? error.toString()}',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  );
+                },
+              ),
+              IgnorePointer(
+                child: Center(
+                  child: Container(
+                    width: w * 0.90,
+                    height: h * 0.62,
+                    margin: EdgeInsets.only(top: h * 0.02),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: Colors.white.withOpacity(.95), width: 2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _AppPalette.cyan.withOpacity(.20),
+                          blurRadius: 18,
+                          spreadRadius: 1,
+                        ),
+                      ],
+                    ),
+                    child: Stack(
+                      children: [
+                        Align(
+                          alignment: Alignment.topCenter,
+                          child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan),
+                        ),
+                        Align(
+                          alignment: Alignment.bottomCenter,
+                          child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan.withOpacity(.7)),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              );
-            },
-          ),
-          IgnorePointer(
-            child: Center(
-              child: Container(
-                width: MediaQuery.of(context).size.width * 0.82,
-                height: 220,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white.withOpacity(.95), width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _AppPalette.cyan.withOpacity(.20),
-                      blurRadius: 18,
-                      spreadRadius: 1,
-                    ),
-                  ],
-                ),
-                child: Stack(
-                  children: [
-                    Align(
-                      alignment: Alignment.topCenter,
-                      child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan),
-                    ),
-                    Align(
-                      alignment: Alignment.bottomCenter,
-                      child: Container(height: 2, margin: const EdgeInsets.symmetric(horizontal: 22, vertical: 12), color: _AppPalette.cyan.withOpacity(.7)),
-                    ),
-                  ],
-                ),
               ),
-            ),
-          ),
-          Positioned(
-            left: 14,
-            right: 14,
-            bottom: 18,
-            child: _GlassPanel(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  const Icon(Icons.qr_code_scanner_rounded),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Kamera varsayılan açık • Biniş kartını çerçeve içine hizalayın',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
+              Positioned(
+                left: 14,
+                right: 14,
+                bottom: 18,
+                child: _GlassPanel(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.qr_code_scanner_rounded),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'PDF417/QR/AZTEC tarama aktif • Barkodu kutu içine alın',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Icon(Icons.center_focus_strong, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Dikey barkodlarda bileti barkod kısmına yaklaştırın • Gerekirse flaşı açın',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Icon(Icons.zoom_in, size: 18),
+                          Expanded(
+                            child: Slider(
+                              value: _zoom,
+                              min: 0,
+                              max: 1,
+                              onChanged: (v) => _setZoom(v),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Zoom -',
+                            onPressed: () => _setZoom((_zoom - 0.1).clamp(0.0, 1.0)),
+                            icon: const Icon(Icons.remove_circle_outline),
+                          ),
+                          IconButton(
+                            tooltip: 'Zoom +',
+                            onPressed: () => _setZoom((_zoom + 0.1).clamp(0.0, 1.0)),
+                            icon: const Icon(Icons.add_circle_outline),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            ),
-          ),
-        ],
+            ],
+          );
+        },
       ),
     );
   }
