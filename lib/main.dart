@@ -2172,9 +2172,11 @@ class _ScanTabState extends State<ScanTab> {
 
   Future<void> _alertVibrate([int count = 2]) async {
     for (var i = 0; i < count; i++) {
-      try { await HapticFeedback.vibrate(); } catch (_) {}
       try { await HapticFeedback.heavyImpact(); } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 110));
+      try { await HapticFeedback.mediumImpact(); } catch (_) {}
+      try { await HapticFeedback.vibrate(); } catch (_) {}
+      try { await SystemSound.play(SystemSoundType.alert); } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 140));
     }
   }
 
@@ -2276,7 +2278,7 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
-  Future<void> _processScanString(String raw) async {
+  Future<void> _processScanString(String raw, {bool manualEntry = false}) async {
     final fSnap0 = await widget.flightRef.get();
     if ((fSnap0.data()?['closed'] ?? false) == true) {
       throw Exception('Uçuş kapatılmış. Scan devre dışı.');
@@ -2374,10 +2376,19 @@ class _ScanTabState extends State<ScanTab> {
         'boardedAt': now,
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
+        if (manualEntry) 'manualBoarded': true,
+        if (manualEntry) 'manualBoardedByEmail': byEmail,
       }, SetOptions(merge: true));
 
       await _autoMarkOpTimesForBoarding();
-      await _log('PAX_PREBOARDED', meta: {'fullName': fullName, 'seat': seat});
+      await _log(
+        manualEntry ? 'PAX_PREBOARDED_MANUAL_SCAN' : 'PAX_PREBOARDED',
+        meta: {
+          'fullName': fullName,
+          'seat': seat,
+          if (manualEntry) 'manuallyBoardedBy': byEmail,
+        },
+      );
 
       await _showResultScreen(
         bg: Colors.green,
@@ -2389,10 +2400,20 @@ class _ScanTabState extends State<ScanTab> {
         'boardedAt': now,
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
+        if (manualEntry) 'manualBoarded': true,
+        if (manualEntry) 'manualBoardedByEmail': byEmail,
       }, SetOptions(merge: true));
 
       await _autoMarkOpTimesForBoarding();
-      await _log('PAX_RANDOM_SELECTED', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl});
+      await _log(
+        manualEntry ? 'PAX_RANDOM_SELECTED_MANUAL_SCAN' : 'PAX_RANDOM_SELECTED',
+        meta: {
+          'fullName': fullName,
+          'seat': seat,
+          'watchlistMatch': isWl,
+          if (manualEntry) 'manuallyBoardedBy': byEmail,
+        },
+      );
 
       if (isWl) {
         await _alertVibrate(3);
@@ -2847,7 +2868,7 @@ class _ScanTabState extends State<ScanTab> {
                                       : () async {
                                           setState(() => _busy = true);
                                           try {
-                                            await _processScanString(_manualScan.text.trim());
+                                            await _processScanString(_manualScan.text.trim(), manualEntry: true);
                                           } catch (e) {
                                             if (mounted) {
                                               ScaffoldMessenger.of(context).showSnackBar(
@@ -2999,10 +3020,22 @@ class _PaxListTabState extends State<PaxListTab> {
             await _manualOffload(d);
           }
         },
-        itemBuilder: (_) => const [
-          PopupMenuItem(value: 'BOARD', child: Text('Manuel Boardla')),
-          PopupMenuItem(value: 'OFFLOAD', child: Text('Manuel Offload')),
-        ],
+        itemBuilder: (_) {
+          final canManualBoard = status != 'PREBOARDED' && status != 'DFT_BOARDED';
+          final canOffload = status == 'PREBOARDED' || status == 'DFT_BOARDED';
+          return [
+            PopupMenuItem(
+              value: 'BOARD',
+              enabled: canManualBoard,
+              child: Text(canManualBoard ? 'Manuel Boardla' : 'Manuel Boardla (Pasif)'),
+            ),
+            PopupMenuItem(
+              value: 'OFFLOAD',
+              enabled: canOffload,
+              child: Text(canOffload ? 'Manuel Offload' : 'Manuel Offload (Pasif)'),
+            ),
+          ];
+        },
       ),
     );
   }
