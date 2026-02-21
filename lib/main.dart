@@ -259,18 +259,19 @@ Future<void> main() async {
   runApp(const GozenBoardingApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  @override
-  Widget build(BuildContext context) => const GozenBoardingApp();
-}
-
 class GozenBoardingApp extends StatefulWidget {
   const GozenBoardingApp({super.key});
 
   @override
   State<GozenBoardingApp> createState() => _GozenBoardingAppState();
+}
+
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => const GozenBoardingApp();
 }
 
 class _GozenBoardingAppState extends State<GozenBoardingApp> {
@@ -1559,7 +1560,15 @@ class _ScanTabState extends State<ScanTab> {
   DateTime? _lastCamHitAt;
   String? _lastCamRaw;
 
-  late final MobileScannerController _scannerController = MobileScannerController();
+  late final MobileScannerController _scannerController = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    formats: const [
+      BarcodeFormat.pdf417,
+      BarcodeFormat.aztec,
+      BarcodeFormat.qrCode,
+      BarcodeFormat.dataMatrix,
+    ],
+  );
 
   bool _torchOn = false;
 
@@ -1651,7 +1660,8 @@ class _ScanTabState extends State<ScanTab> {
   }
 
   Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
-    final r = _sanitizeScanRaw(raw).trim();
+    final rFixed = _sanitizeScanRawPreserve(raw);
+    final r = rFixed.trim();
     if (r.isEmpty) return {};
 
     if (r.contains('|')) {
@@ -1664,7 +1674,7 @@ class _ScanTabState extends State<ScanTab> {
       };
     }
 
-    final up = r.toUpperCase();
+    final up = rFixed.toUpperCase();
     if (up.length >= 40 && (up.startsWith('M') || up.startsWith('S'))) {
       try {
         final nameRaw = up.length >= 22 ? up.substring(2, 22).trim() : '';
@@ -1689,7 +1699,7 @@ class _ScanTabState extends State<ScanTab> {
           }
         }
 
-        final regexFlight = _extractFlightCodeLoose(up, expectedFlightCode: expectedFlightCode);
+        final regexFlight = _extractFlightCodeLoose(_sanitizeScanRaw(raw), expectedFlightCode: expectedFlightCode);
         if (regexFlight.isNotEmpty) {
           final fixedHits = flightCode.isNotEmpty && (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, flightCode);
           final regexHits = (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, regexFlight);
@@ -1721,7 +1731,7 @@ class _ScanTabState extends State<ScanTab> {
     };
   }
 
-  String _sanitizeScanRaw(String raw) {
+  String _sanitizeScanRawPreserve(String raw) {
     final sb = StringBuffer();
     for (final c in raw.runes) {
       if (c == 9 || c == 10 || c == 13) {
@@ -1732,7 +1742,11 @@ class _ScanTabState extends State<ScanTab> {
         sb.write(' ');
       }
     }
-    return sb.toString().replaceAll(RegExp(r'\s+'), ' ');
+    return sb.toString();
+  }
+
+  String _sanitizeScanRaw(String raw) {
+    return _sanitizeScanRawPreserve(raw).replaceAll(RegExp(r'\s+'), ' ');
   }
 
   String _normalizeBcbpName(String rawName) {
@@ -1742,7 +1756,7 @@ class _ScanTabState extends State<ScanTab> {
     if (m != null) {
       final last = m.group(1) ?? '';
       var first = m.group(2) ?? '';
-      first = first.replaceAll(RegExp(r'(MR|MRS|MS|MISS|MSTR|MASTER|CHD|INF|INFT)$'), '');
+      first = first.replaceAll(RegExp(r'(MR|MRS|MS|MISS|MSTR|MASTER|CHD|INF|INFT|MI)$'), '');
       return ('$last $first').trim();
     }
     up = up.replaceAll('/', ' ').replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
@@ -1752,6 +1766,18 @@ class _ScanTabState extends State<ScanTab> {
   String _extractFlightCodeLoose(String raw, {String? expectedFlightCode}) {
     final up = raw.toUpperCase();
     final expected = (expectedFlightCode ?? '').trim();
+
+    // BCBP-friendly extraction: FROM(3) + TO(3) + CARRIER(2/3) + FLIGHT(1-4)
+    // Examples: DLMMANLS 1730, BRSDLMTOM0836, DLMEDIXQ 0688
+    final bcbpLeg = RegExp(r'\b([A-Z]{3})([A-Z]{3})([A-Z0-9]{2,3})\s*0*([0-9]{1,4})\b');
+    for (final m in bcbpLeg.allMatches(up)) {
+      final carrier = (m.group(3) ?? '').trim();
+      final num = (m.group(4) ?? '').trim();
+      final n = _normalizeFlightCode('$carrier$num');
+      if (n.isEmpty) continue;
+      if (expected.isNotEmpty && _flightCodeMatches(expected, n)) return n;
+    }
+
     final re1 = RegExp(r'\b([A-Z0-9]{1,3})\s*0*([0-9]{1,5})(?:\s*[A-Z])?\b');
     final matches = re1.allMatches(up).toList();
 
@@ -2259,7 +2285,14 @@ class _ScanTabState extends State<ScanTab> {
 
   Future<void> _onCameraDetect(BarcodeCapture capture) async {
     if (!_cameraOn) return;
-    final raw = capture.barcodes.isNotEmpty ? (capture.barcodes.first.rawValue ?? '') : '';
+    String raw = '';
+    for (final b in capture.barcodes) {
+      final v = (b.rawValue ?? b.displayValue ?? '').trim();
+      if (v.isNotEmpty) {
+        raw = v;
+        break;
+      }
+    }
     if (raw.trim().isEmpty) return;
 
     final now = DateTime.now();
