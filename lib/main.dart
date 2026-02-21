@@ -2098,15 +2098,50 @@ class _ScanTabState extends State<ScanTab> {
   }
 
 
-  Future<bool> _isWatchlistMatch(String fullName) async {
+  String _normPnr(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+
+  int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    final curr = List<int>.filled(b.length + 1, 0);
+    for (var i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      for (var j = 1; j <= b.length; j++) {
+        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+        curr[j] = [curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost].reduce((x, y) => x < y ? x : y);
+      }
+      for (var j = 0; j <= b.length; j++) {
+        prev[j] = curr[j];
+      }
+    }
+    return prev[b.length];
+  }
+
+  double _pnrSimilarityRatio(String a, String b) {
+    final aa = _normPnr(a);
+    final bb = _normPnr(b);
+    if (aa.isEmpty || bb.isEmpty) return 0;
+    final maxLen = aa.length > bb.length ? aa.length : bb.length;
+    if (maxLen == 0) return 1;
+    final dist = _levenshtein(aa, bb);
+    return (maxLen - dist) / maxLen;
+  }
+
+  Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
     final scannedKeys = _nameKeyVariants(fullName);
     if (scannedKeys.isEmpty) return false;
+    final scanPnr = _normPnr(pnr);
+    if (scanPnr.isEmpty) return false;
 
     final snap = await widget.flightRef.collection('watchlist').limit(500).get();
     for (final d in snap.docs) {
       final data = d.data();
       final wlName = (data['fullName'] ?? '').toString();
       if (wlName.trim().isEmpty) continue;
+      final wlPnr = _normPnr((data['pnr'] ?? '').toString());
+      if (wlPnr.isEmpty) continue;
 
       // Prefer precomputed keys if present
       final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
@@ -2119,7 +2154,11 @@ class _ScanTabState extends State<ScanTab> {
         wlKeys.addAll(_nameKeyVariants(wlName));
       }
 
-      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+      final nameOk = wlKeys.intersection(scannedKeys).isNotEmpty;
+      if (!nameOk) continue;
+
+      final pnrRatio = _pnrSimilarityRatio(scanPnr, wlPnr);
+      if (pnrRatio >= 0.80) return true;
     }
     return false;
   }
@@ -2170,13 +2209,17 @@ class _ScanTabState extends State<ScanTab> {
     return keys;
   }
 
-  Future<void> _alertVibrate([int count = 2]) async {
+  Future<void> _alertVibrate([int count = 3]) async {
     for (var i = 0; i < count; i++) {
+      try { Feedback.forLongPress(context); } catch (_) {}
       try { await HapticFeedback.heavyImpact(); } catch (_) {}
       try { await HapticFeedback.mediumImpact(); } catch (_) {}
+      try { await HapticFeedback.selectionClick(); } catch (_) {}
       try { await HapticFeedback.vibrate(); } catch (_) {}
       try { await SystemSound.play(SystemSoundType.alert); } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 140));
+      await Future.delayed(const Duration(milliseconds: 110));
+      try { await HapticFeedback.vibrate(); } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 180));
     }
   }
 
@@ -2317,7 +2360,7 @@ class _ScanTabState extends State<ScanTab> {
     }
 
 // Offer Pre-BOARD vs DFT Random
-    final isWl = await _isWatchlistMatch(fullName);
+    final isWl = await _isWatchlistMatch(fullName, pnr: pnr);
 
     final choice = await showDialog<String>(
       context: context,
@@ -2340,6 +2383,11 @@ class _ScanTabState extends State<ScanTab> {
     );
 
     if (choice == null) return;
+
+    // Seat-level duplicate / infant flow
+    if (await _handleSeatDuplicateOrInfant(fullName: fullName, seat: seat, pnr: pnr)) {
+      return;
+    }
 
     // Find existing pax by (fullName + seat) or create if missing.
     final paxCol = widget.flightRef.collection('pax');
@@ -2435,6 +2483,91 @@ class _ScanTabState extends State<ScanTab> {
   bool _isBoardedStatus(String s) {
     final v = s.trim().toUpperCase();
     return v == 'PREBOARDED' || v == 'DFT_BOARDED';
+  }
+
+
+  Future<bool> _handleSeatDuplicateOrInfant({
+    required String fullName,
+    required String seat,
+    required String pnr,
+  }) async {
+    final seatKey = seat.trim().toUpperCase();
+    if (seatKey.isEmpty) return false;
+
+    final seatSnap = await widget.flightRef.collection('pax').where('seat', isEqualTo: seatKey).get();
+    final boarded = seatSnap.docs.where((d) => _isBoardedStatus((d.data()['status'] ?? '').toString())).toList();
+    if (boarded.isEmpty) return false;
+
+    // Same seat already boarded. If same passenger => duplicate. Otherwise ask infant flow.
+    final sameName = boarded.where((d) {
+      final n = (d.data()['fullName'] ?? '').toString().trim().toUpperCase();
+      return n == fullName.trim().toUpperCase();
+    }).toList();
+
+    final hit = (sameName.isNotEmpty ? sameName.first : boarded.first);
+    final hitData = hit.data();
+    final boardedName = (hitData['fullName'] ?? '').toString();
+    final boardedStatus = (hitData['status'] ?? '').toString();
+
+    if (sameName.isNotEmpty) {
+      await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
+        'reason': 'seat_same_name',
+        'seat': seatKey,
+        'fullName': fullName,
+        'pnr': pnr,
+        'existingPaxId': hit.id,
+        'existingStatus': boardedStatus,
+      });
+      await _alertVibrate(3);
+      if (!mounted) return true;
+      await _showResultScreen(
+        bg: Colors.orange,
+        title: 'MUKERRER KART',
+        subtitle: 'Bu yolcu zaten board edildi • Koltuk: $seatKey',
+      );
+      return true;
+    }
+
+    if (!mounted) return true;
+    final infant = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Aynı Koltuk Tespit Edildi'),
+        content: Text('Koltuk $seatKey zaten board edildi (Yolcu: $boardedName). Bu yolcu infant mı?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Infant')),
+        ],
+      ),
+    );
+
+    if (infant == true) {
+      await _log('PAX_INFANT_SEAT_OVERRIDE_ALLOWED', meta: {
+        'seat': seatKey,
+        'newFullName': fullName,
+        'newPnr': pnr,
+        'existingPaxId': hit.id,
+        'existingFullName': boardedName,
+      });
+      return false;
+    }
+
+    await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
+      'reason': 'seat_conflict_non_infant',
+      'seat': seatKey,
+      'fullName': fullName,
+      'pnr': pnr,
+      'existingPaxId': hit.id,
+      'existingFullName': boardedName,
+      'existingStatus': boardedStatus,
+    });
+    await _alertVibrate(3);
+    await _showResultScreen(
+      bg: Colors.orange,
+      title: 'MUKERRER KART',
+      subtitle: 'Koltuk $seatKey zaten board edildi.',
+    );
+    return true;
   }
 
   Future<bool> _showDuplicateIfNeeded(DocumentReference<Map<String, dynamic>> paxRef, {String? fallbackName, String? fallbackSeat}) async {
@@ -2728,10 +2861,10 @@ class _ScanTabState extends State<ScanTab> {
           stream: widget.flightRef.collection('pax').snapshots(),
           builder: (context, paxSnap) {
             final paxDocs = paxSnap.data?.docs ?? const [];
-            final booked = paxDocs.length;
+            final bookedTarget = int.tryParse((fData['bookedPax'] ?? 0).toString()) ?? 0;
             final dft = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'DFT_BOARDED').length;
             final pre = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'PREBOARDED').length;
-            final pctBooked = booked == 0 ? 0.0 : (dft * 100.0 / booked);
+            final pctBooked = bookedTarget == 0 ? 0.0 : (dft * 100.0 / bookedTarget);
             final boardedTotal = pre + dft;
             final pctBoarded = boardedTotal == 0 ? 0.0 : (dft * 100.0 / boardedTotal);
 
@@ -2763,7 +2896,7 @@ class _ScanTabState extends State<ScanTab> {
                                     const Text('DFT / Booked Pax', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
                                     const SizedBox(height: 4),
                                     Text('%${pctBooked.toStringAsFixed(1)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                                    Text('$dft / $booked', style: const TextStyle(fontSize: 11)),
+                                    Text('$dft / $bookedTarget', style: const TextStyle(fontSize: 11)),
                                   ],
                                 ),
                               ),
@@ -2981,6 +3114,8 @@ class _PaxListTabState extends State<PaxListTab> {
     final seat = (data['seat'] ?? '').toString();
     final pnr = (data['pnr'] ?? '').toString();
     final status = (data['status'] ?? 'NONE').toString();
+    final isWatchlistHit = (data['watchlistMatch'] ?? false) == true;
+    final wlTextStyle = isWatchlistHit ? const TextStyle(color: Colors.black, fontWeight: FontWeight.w800) : null;
 
     final boardedBy = (data['boardedByEmail'] ?? '').toString();
     final manualBoardedBy = (data['manualBoardedByEmail'] ?? '').toString();
@@ -2997,18 +3132,21 @@ class _PaxListTabState extends State<PaxListTab> {
     String timeStr(DateTime? dt) => dt == null ? '—' : DateFormat('yyyy-MM-dd HH:mm').format(dt);
 
     return ListTile(
-      title: Text(name.isEmpty ? '—' : name),
+      tileColor: isWatchlistHit ? Colors.red : null,
+      title: Text(name.isEmpty ? '—' : name, style: wlTextStyle),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}'),
-          Text('Status: $status'),
-          Text('Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}'),
+          Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}', style: wlTextStyle),
+          Text('Status: $status', style: wlTextStyle),
+          Text('Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}', style: wlTextStyle),
           if (manualBoardedBy.isNotEmpty)
             Text('Manual boarding: EVET  •  Manually boarded by: $manualBoardedBy',
-                style: const TextStyle(fontWeight: FontWeight.w700)),
-          Text('Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
+                style: isWatchlistHit
+                    ? const TextStyle(color: Colors.black, fontWeight: FontWeight.w900)
+                    : const TextStyle(fontWeight: FontWeight.w700)),
+          Text('Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}', style: wlTextStyle),
         ],
       ),
       isThreeLine: false,
@@ -3045,7 +3183,7 @@ class _PaxListTabState extends State<PaxListTab> {
     return (s.data()?['email'] ?? '').toString();
   }
 
-  Future<bool> _isWatchlistMatch(String fullName) async {
+  Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
     final scannedKeys = _nameKeyVariants(fullName);
     if (scannedKeys.isEmpty) return false;
 
@@ -3326,13 +3464,30 @@ class WatchlistTab extends StatelessWidget {
     });
   }
 
+  Future<bool> _canWrite() async {
+    final me = await Db.userDoc(currentUid).get();
+    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final f = await flightRef.get();
+    final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
+    return currentUid == ownerUid || role == 'Supervisor' || role == 'Admin';
+  }
+
   Future<void> _add(BuildContext context) async {
-    final c = TextEditingController();
+    if (!await _canWrite()) return;
+    final cName = TextEditingController();
+    final cPnr = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('WatchList Ekle'),
-        content: TextField(controller: c, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+            const SizedBox(height: 8),
+            TextField(controller: cPnr, decoration: const InputDecoration(labelText: 'PNR')),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
@@ -3341,24 +3496,37 @@ class WatchlistTab extends StatelessWidget {
     );
     if (ok != true) return;
 
-    final name = c.text.trim();
+    final name = cName.text.trim();
+    final pnr = cPnr.text.trim().toUpperCase();
     if (name.isEmpty) return;
 
     await flightRef.collection('watchlist').add({
       'fullName': name,
+      'pnr': pnr,
       'nameKeys': WatchlistTab._buildNameKeys(name),
       'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
     });
-    await _log('WATCHLIST_ADD', meta: {'fullName': name});
+    await _log('WATCHLIST_ADD', meta: {'fullName': name, 'pnr': pnr});
   }
 
   Future<void> _edit(BuildContext context, DocumentReference<Map<String, dynamic>> ref, String current) async {
-    final c = TextEditingController(text: current);
+    if (!await _canWrite()) return;
+    final refSnap = await ref.get();
+    final cName = TextEditingController(text: current);
+    final cPnr = TextEditingController(text: (refSnap.data()?['pnr'] ?? '').toString());
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('WatchList Düzenle'),
-        content: TextField(controller: c, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+            const SizedBox(height: 8),
+            TextField(controller: cPnr, decoration: const InputDecoration(labelText: 'PNR')),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Kaydet')),
@@ -3367,14 +3535,21 @@ class WatchlistTab extends StatelessWidget {
     );
     if (ok != true) return;
 
-    final name = c.text.trim();
+    final name = cName.text.trim();
+    final pnr = cPnr.text.trim().toUpperCase();
     if (name.isEmpty) return;
 
-    await ref.set({'fullName': name}, SetOptions(merge: true));
-    await _log('WATCHLIST_EDIT', meta: {'from': current, 'to': name});
+    await ref.set({
+      'fullName': name,
+      'pnr': pnr,
+      'nameKeys': WatchlistTab._buildNameKeys(name),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    await _log('WATCHLIST_EDIT', meta: {'from': current, 'to': name, 'pnr': pnr});
   }
 
   Future<void> _delete(DocumentReference<Map<String, dynamic>> ref, String name) async {
+    if (!await _canWrite()) return;
     await ref.delete();
     await _log('WATCHLIST_DELETE', meta: {'fullName': name});
   }
@@ -3404,9 +3579,11 @@ class WatchlistTab extends StatelessWidget {
             itemBuilder: (_, i) {
               final d = docs[i];
               final name = (d.data()['fullName'] ?? '').toString();
+              final pnr = (d.data()['pnr'] ?? '').toString();
 
               return ListTile(
                 title: Text(name.isEmpty ? '—' : name),
+                subtitle: Text('PNR: ${pnr.isEmpty ? "—" : pnr}'),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -3444,6 +3621,16 @@ class StaffTab extends StatefulWidget {
 }
 
 class _StaffTabState extends State<StaffTab> {
+  Future<bool> _canWrite() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) return false;
+    final me = await Db.userDoc(uid).get();
+    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final f = await widget.flightRef.get();
+    final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
+    return uid == ownerUid || role == 'Supervisor' || role == 'Admin';
+  }
+
   static const roles = [
     'Supervisor',
     'Team Leader',
@@ -3466,6 +3653,7 @@ class _StaffTabState extends State<StaffTab> {
   ];
 
   Future<void> _addStaff() async {
+    if (!await _canWrite()) return;
     final name = TextEditingController();
     String role = roles.first;
 
@@ -3504,6 +3692,46 @@ class _StaffTabState extends State<StaffTab> {
     }
   }
 
+  Future<void> _editStaff(DocumentReference<Map<String, dynamic>> ref, Map<String, dynamic> current) async {
+    if (!await _canWrite()) return;
+    final name = TextEditingController(text: (current['fullName'] ?? '').toString());
+    String role = (current['role'] ?? roles.first).toString();
+    if (!roles.contains(role)) role = roles.first;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Personel Düzenle'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: name, decoration: const InputDecoration(labelText: 'Ad Soyad')),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: role,
+              items: roles.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+              onChanged: (v) => role = v ?? roles.first,
+              decoration: const InputDecoration(labelText: 'Rol'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Kaydet')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final n = name.text.trim();
+    if (n.isEmpty) return;
+
+    await ref.set({
+      'fullName': n,
+      'role': role,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
   @override
   Widget build(BuildContext context) {
     final stream = widget.flightRef.collection('staff').orderBy('createdAt', descending: true).snapshots();
@@ -3531,9 +3759,22 @@ class _StaffTabState extends State<StaffTab> {
               return ListTile(
                 title: Text((data['fullName'] ?? '').toString()),
                 subtitle: Text((data['role'] ?? '').toString()),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete),
-                  onPressed: () => d.reference.delete(),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Düzenle',
+                      icon: const Icon(Icons.edit),
+                      onPressed: () => _editStaff(d.reference, data),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete),
+                      onPressed: () async {
+                        if (!await _canWrite()) return;
+                        await d.reference.delete();
+                      },
+                    ),
+                  ],
                 ),
               );
             },
@@ -3557,9 +3798,20 @@ class EquipmentTab extends StatefulWidget {
 }
 
 class _EquipmentTabState extends State<EquipmentTab> {
+  Future<bool> _canWrite() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) return false;
+    final me = await Db.userDoc(uid).get();
+    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final f = await widget.flightRef.get();
+    final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
+    return uid == ownerUid || role == 'Supervisor' || role == 'Admin';
+  }
+
   static const etdModels = ['IS600', 'Itimiser4DX'];
 
   Future<void> _addItem(String type) async {
+    if (!await _canWrite()) return;
     final c = TextEditingController();
     String etdModel = etdModels.first;
 
@@ -3647,7 +3899,10 @@ class _EquipmentTabState extends State<EquipmentTab> {
                 subtitle: model.isEmpty ? null : Text('Model: $model'),
                 trailing: IconButton(
                   icon: const Icon(Icons.delete),
-                  onPressed: () => d.reference.delete(),
+                  onPressed: () async {
+                    if (!await _canWrite()) return;
+                    await d.reference.delete();
+                  },
                 ),
               );
             },
@@ -3748,9 +4003,10 @@ class _OpTimesTabState extends State<OpTimesTab> {
 
     final paxSnap = await widget.flightRef.collection('pax').orderBy('fullName').get();
     final rows = <List<String>>[];
-    rows.add(['FULL_NAME','PNR','SEAT','STATUS','BOARDING_TIME','BOARDED_BY','MANUAL_BOARDED_BY','OFFLOADED_TIME','OFFLOADED_BY']);
+    rows.add(['FULL_NAME','PNR','SEAT','STATUS','BOARDING_TIME','BOARDED_BY','MANUAL_BOARDED_BY','OFFLOADED_TIME','OFFLOADED_BY','WATCHLIST_MATCH','WATCHLIST_ALERT']);
     for (final d in paxSnap.docs) {
       final data = d.data();
+      final wl = (data['watchlistMatch'] ?? false) == true;
       rows.add([
         (data['fullName'] ?? '').toString(),
         (data['pnr'] ?? '').toString(),
@@ -3761,6 +4017,8 @@ class _OpTimesTabState extends State<OpTimesTab> {
         (data['manualBoardedByEmail'] ?? '').toString(),
         _fmtTs(data['offloadedAt']),
         (data['offloadedByEmail'] ?? '').toString(),
+        wl ? 'YES' : 'NO',
+        wl ? 'RED_BG_BLACK_BOLD' : '',
       ]);
     }
 
@@ -3795,6 +4053,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
   }
 
   Future<void> _setFieldWithRules(String key, DateTime? value) async {
+    if (!await _canManageClosedFlight()) return;
     final snapBefore = await widget.flightRef.get();
     final dataBefore = snapBefore.data() ?? {};
     final wasClosed = (dataBefore['closed'] ?? false) == true;
@@ -4029,6 +4288,8 @@ class _ReportTabState extends State<ReportTab> {
       'OFFLOADED_TIME',
       'MANUAL_BOARDED_BY',
       'OFFLOADED_BY',
+      'WATCHLIST_MATCH',
+      'WATCHLIST_ALERT',
     ]);
 
     for (final d in paxSnap.docs) {
@@ -4037,6 +4298,7 @@ class _ReportTabState extends State<ReportTab> {
       final pnr = (data['pnr'] ?? '').toString();
       final seat = (data['seat'] ?? '').toString();
       final status = (data['status'] ?? 'NONE').toString();
+      final wl = (data['watchlistMatch'] ?? false) == true;
 
       rows.add([
         name,
@@ -4048,6 +4310,8 @@ class _ReportTabState extends State<ReportTab> {
         (data['manualBoardedByEmail'] ?? '').toString(),
         _fmtTs(data['offloadedAt']),
         (data['offloadedByEmail'] ?? '').toString(),
+        wl ? 'YES' : 'NO',
+        wl ? 'RED_BG_BLACK_BOLD' : '',
       ]);
     }
 
