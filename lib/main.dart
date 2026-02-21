@@ -256,6 +256,9 @@ class _GlassPanel extends StatelessWidget {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+  ]);
   await Firebase.initializeApp();
   runApp(const GozenBoardingApp());
 }
@@ -1091,106 +1094,76 @@ class _MergedAgentFlights extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ownedQ = Db.flights()
-        .where('ownerUid', isEqualTo: uid)
-        .orderBy('createdAt', descending: true)
-        .limit(100);
-
-    final partQ = Db.flights()
-        .where('participants', arrayContains: uid)
-        .orderBy('createdAt', descending: true)
-        .limit(100);
+    final q = Db.flights().orderBy('createdAt', descending: true).limit(100);
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: ownedQ.snapshots(),
-      builder: (context, snapOwned) {
-        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: partQ.snapshots(),
-          builder: (context, snapPart) {
-            final owned = snapOwned.data?.docs ?? [];
-            final part = snapPart.data?.docs ?? [];
-            final map = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
-            for (final d in owned) { map[d.id] = d; }
-            for (final d in part) { map[d.id] = d; }
+      stream: q.snapshots(),
+      builder: (context, snap) {
+        final all = snap.data?.docs ?? [];
+        final openDocs = all.where((d) => (d.data()['closed'] ?? false) != true).toList();
+        final closedDocs = all.where((d) {
+          final data = d.data();
+          if (!_isFlightClosedVisible(data)) return false;
+          final ownerUid = (data['ownerUid'] ?? '').toString();
+          return ownerUid == uid;
+        }).toList();
 
-            final docs = map.values.toList()
-              ..sort((a, b) {
-                final at = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-                final bt = (b.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-                return bt.compareTo(at);
-              });
-
-            final openDocs = docs.where((d) => (d.data()['closed'] ?? false) != true).toList();
-            final closedDocs = docs.where((d) {
-              final data = d.data();
-              if (!_isFlightClosedVisible(data)) return false;
-              final ownerUid = (data['ownerUid'] ?? '').toString();
-              return ownerUid == uid;
-            }).toList();
-
-            Widget buildList(List<QueryDocumentSnapshot<Map<String, dynamic>>> list, {required bool closed}) {
-              if (list.isEmpty) {
-                return Center(
-                  child: Text(
-                    closed
-                        ? 'Kapatılmış uçuş yok (24 saat) veya erişimin yok.'
-                        : 'Henüz erişebildiğin açık uçuş yok. Davet bekliyor olabilirsin.',
-                  ),
-                );
-              }
-
-              return ListView.separated(
-                itemCount: list.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (context, i) {
-                  final doc = list[i];
-                  final data = doc.data();
-                  final ownerUid = (data['ownerUid'] ?? '').toString();
-                  final isOwner = ownerUid == uid;
-                  final isParticipant = List<String>.from(data['participants'] ?? []).contains(uid);
-
-                  final subtitle = closed
-                      ? 'Kapatılmış uçuş • Sadece sahip erişebilir'
-                      : (isOwner
-                          ? 'Sahibi sensin'
-                          : isParticipant
-                              ? 'Davetli katılımcı'
-                              : '—');
-
-                  return _flightTile(
-                    context: context,
-                    doc: doc,
-                    uid: uid,
-                    role: role,
-                    subtitle: subtitle,
-                    allowOpen: !closed || isOwner,
-                  );
-                },
-              );
-            }
-
-            return DefaultTabController(
-              length: 2,
-              child: Column(
-                children: [
-                  const TabBar(
-                    tabs: [
-                      Tab(text: 'Açık Uçuşlar'),
-                      Tab(text: 'Kapatılmış Uçuşlar'),
-                    ],
-                  ),
-                  Expanded(
-                    child: TabBarView(
-                      children: [
-                        buildList(openDocs, closed: false),
-                        buildList(closedDocs, closed: true),
-                      ],
-                    ),
-                  ),
-                ],
+        Widget buildList(List<QueryDocumentSnapshot<Map<String, dynamic>>> list, {required bool closed}) {
+          if (list.isEmpty) {
+            return Center(
+              child: Text(
+                closed
+                    ? 'Kapatılmış uçuş yok (24 saat) veya erişimin yok.'
+                    : 'Henüz açık uçuş yok.',
               ),
             );
-          },
+          }
+
+          return ListView.separated(
+            itemCount: list.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, i) {
+              final doc = list[i];
+              final data = doc.data();
+              final ownerUid = (data['ownerUid'] ?? '').toString();
+              final isOwner = ownerUid == uid;
+
+              final subtitle = closed
+                  ? 'Kapatılmış uçuş • Sadece sahip erişebilir'
+                  : (isOwner ? 'Sahibi sensin' : 'Operasyon görüntüleme/scan erişimi');
+
+              return _flightTile(
+                context: context,
+                doc: doc,
+                uid: uid,
+                role: role,
+                subtitle: subtitle,
+                allowOpen: !closed || isOwner,
+              );
+            },
+          );
+        }
+
+        return DefaultTabController(
+          length: 2,
+          child: Column(
+            children: [
+              const TabBar(
+                tabs: [
+                  Tab(text: 'Açık Uçuşlar'),
+                  Tab(text: 'Kapatılmış Uçuşlar'),
+                ],
+              ),
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    buildList(openDocs, closed: false),
+                    buildList(closedDocs, closed: true),
+                  ],
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
