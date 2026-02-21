@@ -409,6 +409,26 @@ class Db {
       fs.collection('invites');
 }
 
+String _normalizeRoleValue(dynamic rawRole, {String? email}) {
+  final e = (email ?? '').trim().toLowerCase();
+  if (e == 'vlkntskrn@gmail.com') return 'Admin';
+  final r = (rawRole ?? 'Agent').toString().trim().toLowerCase();
+  if (r == 'admin') return 'Admin';
+  if (r == 'supervisor') return 'Supervisor';
+  return 'Agent';
+}
+
+bool _isOwnerSupervisorOrAdmin({
+  required String currentUid,
+  required String ownerUid,
+  required String role,
+  String? currentEmail,
+}) {
+  if (currentUid == ownerUid) return true;
+  if ((currentEmail ?? '').trim().toLowerCase() == 'vlkntskrn@gmail.com') return true;
+  return role == 'Supervisor' || role == 'Admin';
+}
+
 // ==========================
 // Login
 // ==========================
@@ -632,7 +652,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<String> _getRole() async {
     final snap = await Db.userDoc(_uid).get();
-    return (snap.data()?['role'] ?? 'Agent').toString();
+    return _normalizeRoleValue(snap.data()?['role'], email: (snap.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
   }
 
   Future<void> _logout() async => FirebaseAuth.instance.signOut();
@@ -744,7 +764,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       builder: (context, snap) {
         final data = snap.data ?? {};
         final email = (data['email'] ?? '').toString();
-        final role = (data['role'] ?? 'Agent').toString();
+        final role = _normalizeRoleValue(data['role'], email: (data['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
 
         return Scaffold(
           appBar: AppBar(title: const Text('Profil')),
@@ -2216,10 +2236,8 @@ class _ScanTabState extends State<ScanTab> {
       keys.add(tokens[1] + tokens[0]);
     }
 
-    // Add each token itself (handles single token watchlist entries)
-    for (final t in tokens) {
-      if (t.length >= 3) keys.add(t);
-    }
+    // Single-token matches are intentionally excluded to avoid false positives
+    // like "ZEYNEP TURK" matching "ZEYNEP KOPUZ" only by first name.
 
     return keys;
   }
@@ -2737,12 +2755,12 @@ class _ScanTabState extends State<ScanTab> {
 
   Future<void> _inviteUser() async {
     final meRoleSnap = await Db.userDoc(widget.currentUid).get();
-    final myRole = (meRoleSnap.data()?['role'] ?? 'Agent').toString();
+    final myRole = _normalizeRoleValue(meRoleSnap.data()?['role'], email: (meRoleSnap.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
 
     final fSnap = await widget.flightRef.get();
     final ownerUid = (fSnap.data()?['ownerUid'] ?? '').toString();
 
-    final canInvite = ownerUid == widget.currentUid || myRole == 'Supervisor' || myRole == 'Admin';
+    final canInvite = _isOwnerSupervisorOrAdmin(currentUid: widget.currentUid, ownerUid: ownerUid, role: myRole, currentEmail: FirebaseAuth.instance.currentUser?.email);
 
     if (!canInvite) {
       if (!mounted) return;
@@ -2753,12 +2771,8 @@ class _ScanTabState extends State<ScanTab> {
     }
 
     final participants = ((fSnap.data()?['participants'] as List?) ?? const []).length;
-    final pendingInvites = (await Db.invites()
-            .where('flightId', isEqualTo: widget.flightRef.id)
-            .where('status', isEqualTo: 'PENDING')
-            .get())
-        .docs
-        .length;
+    final pendingInvitesSnap = await Db.invites().where('flightId', isEqualTo: widget.flightRef.id).get();
+    final pendingInvites = pendingInvitesSnap.docs.where((d) => (d.data()['status'] ?? '').toString() == 'PENDING').length;
     if (participants + pendingInvites >= 7) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2797,13 +2811,17 @@ class _ScanTabState extends State<ScanTab> {
     try {
       String inviteeEmail = normalizedInput;
       String inviteeUid = '';
-      final userQ = await Db.users().where('usernameLower', isEqualTo: inviteeUsernameLower).limit(1).get();
+      QuerySnapshot<Map<String, dynamic>> userQ = await Db.users().where('usernameLower', isEqualTo: inviteeUsernameLower).limit(1).get();
+      if (userQ.docs.isEmpty && normalizedInput.contains('@')) {
+        userQ = await Db.users().where('email', isEqualTo: normalizedInput).limit(1).get();
+      }
       if (userQ.docs.isNotEmpty) {
         final u = userQ.docs.first;
         final ud = u.data();
         inviteeUid = u.id;
         inviteeEmail = (ud['email'] ?? inviteeEmail).toString().trim().toLowerCase();
       } else if (!normalizedInput.contains('@')) {
+        // Legacy users may not have usernameLower; try email fallback as username@domain guess is not safe.
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Davet gönderilememiştir. Kullanıcı bulunamadı.')),
@@ -2815,13 +2833,18 @@ class _ScanTabState extends State<ScanTab> {
       final fData = fSnap.data() ?? {};
       final flightCode = (fData['flightCode'] ?? '').toString();
 
-      final dup = await Db.invites()
-          .where('flightId', isEqualTo: widget.flightRef.id)
-          .where('status', isEqualTo: 'PENDING')
-          .where('inviteeUsernameLower', isEqualTo: inviteeUsernameLower)
-          .limit(1)
-          .get();
-      if (dup.docs.isNotEmpty) {
+      final dupSnap = await Db.invites().where('flightId', isEqualTo: widget.flightRef.id).get();
+      final hasDup = dupSnap.docs.any((d) {
+        final m = d.data();
+        if ((m['status'] ?? '').toString() != 'PENDING') return false;
+        final iu = (m['inviteeUid'] ?? '').toString();
+        final ie = (m['inviteeEmail'] ?? '').toString().trim().toLowerCase();
+        final iun = (m['inviteeUsernameLower'] ?? '').toString().trim().toLowerCase();
+        if (inviteeUid.isNotEmpty && iu == inviteeUid) return true;
+        if (inviteeEmail.isNotEmpty && ie == inviteeEmail) return true;
+        return iun == inviteeUsernameLower;
+      });
+      if (hasDup) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Davet gönderilememiştir. Bu kullanıcıya bekleyen davet var.')),
@@ -3312,10 +3335,8 @@ class _PaxListTabState extends State<PaxListTab> {
       keys.add(tokens[1] + tokens[0]);
     }
 
-    // Add each token itself (handles single token watchlist entries)
-    for (final t in tokens) {
-      if (t.length >= 3) keys.add(t);
-    }
+    // Single-token matches are intentionally excluded to avoid false positives
+    // like "ZEYNEP TURK" matching "ZEYNEP KOPUZ" only by first name.
 
     return keys;
   }
@@ -3531,7 +3552,7 @@ class WatchlistTab extends StatelessWidget {
 
   Future<bool> _canWrite() async {
     final me = await Db.userDoc(currentUid).get();
-    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final role = _normalizeRoleValue(me.data()?['role'], email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
     final f = await flightRef.get();
     final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
     return currentUid == ownerUid || role == 'Supervisor' || role == 'Admin';
@@ -3668,7 +3689,7 @@ class _StaffTabState extends State<StaffTab> {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (uid.isEmpty) return false;
     final me = await Db.userDoc(uid).get();
-    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final role = _normalizeRoleValue(me.data()?['role'], email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
     final f = await widget.flightRef.get();
     final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
     return uid == ownerUid || role == 'Supervisor' || role == 'Admin';
@@ -3845,7 +3866,7 @@ class _EquipmentTabState extends State<EquipmentTab> {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (uid.isEmpty) return false;
     final me = await Db.userDoc(uid).get();
-    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final role = _normalizeRoleValue(me.data()?['role'], email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
     final f = await widget.flightRef.get();
     final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
     return uid == ownerUid || role == 'Supervisor' || role == 'Admin';
@@ -4028,7 +4049,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
 
   Future<bool> _canManageClosedFlight() async {
     final me = await Db.userDoc(widget.currentUid).get();
-    final role = (me.data()?['role'] ?? 'Agent').toString();
+    final role = _normalizeRoleValue(me.data()?['role'], email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
     final f = await widget.flightRef.get();
     final ownerUid = (f.data()?['ownerUid'] ?? '').toString();
     return widget.currentUid == ownerUid || role == 'Supervisor' || role == 'Admin';
