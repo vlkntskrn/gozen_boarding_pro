@@ -2053,6 +2053,10 @@ class _ScanTabState extends State<ScanTab> {
       }, SetOptions(merge: true));
     }
 
+    if (await _showDuplicateIfNeeded(paxRef, fallbackName: fullName, fallbackSeat: seat)) {
+      return;
+    }
+
     final byEmail = await _emailOf(widget.currentUid);
     final now = FieldValue.serverTimestamp();
 
@@ -2095,6 +2099,36 @@ class _ScanTabState extends State<ScanTab> {
     }
   }
 
+
+  bool _isBoardedStatus(String s) {
+    final v = s.trim().toUpperCase();
+    return v == 'PREBOARDED' || v == 'DFT_BOARDED';
+  }
+
+  Future<bool> _showDuplicateIfNeeded(DocumentReference<Map<String, dynamic>> paxRef, {String? fallbackName, String? fallbackSeat}) async {
+    final snap = await paxRef.get();
+    final data = snap.data() ?? {};
+    final status = (data['status'] ?? '').toString();
+    if (!_isBoardedStatus(status)) return false;
+
+    final fullName = ((data['fullName'] ?? fallbackName) ?? '').toString();
+    final seat = ((data['seat'] ?? fallbackSeat) ?? '').toString();
+    await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
+      'paxId': paxRef.id,
+      'fullName': fullName,
+      'seat': seat,
+      'status': status,
+    });
+
+    if (!mounted) return true;
+    await _showResultScreen(
+      bg: Colors.orange,
+      title: 'MUKERRER KART',
+      subtitle: 'Bu yolcu zaten board edildi${seat.isNotEmpty ? ' • Koltuk: $seat' : ''}',
+    );
+    return true;
+  }
+
   Future<void> _manualBoardOrOffload({required bool offload}) async {
     // Select pax from list (simple dialog)
     final pax = await widget.flightRef.collection('pax').orderBy('fullName').get();
@@ -2134,6 +2168,10 @@ class _ScanTabState extends State<ScanTab> {
     );
 
     if (selected == null) return;
+
+    if (!offload && await _showDuplicateIfNeeded(selected.reference)) {
+      return;
+    }
 
     if (offload) {
       final byEmail = await _emailOf(widget.currentUid);
