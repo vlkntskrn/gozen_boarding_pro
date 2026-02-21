@@ -715,7 +715,6 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
             child: Column(
               children: [
-                _PendingInvitesBar(uid: _uid),
                 const SizedBox(height: 6),
                 Expanded(
                   child: _GlassPanel(
@@ -1555,27 +1554,30 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
 
     final data = doc.data()!;
     final owner = (data['ownerUid'] ?? '').toString();
-    final participants = List<String>.from(data['participants'] ?? []);
-
     final isClosed = (data['closed'] ?? false) == true;
 
     if (widget.forceAllow) return _Access(allowed: true, reason: null);
-
     if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
 
+    final me = await Db.userDoc(widget.currentUid).get();
+    final role = _normalizeRoleValue(
+      me.data()?['role'],
+      email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString(),
+    );
+
     if (isClosed) {
-      return _Access(
-        allowed: false,
-        reason: 'Bu uçuş kapatılmış. Kapatılmış uçuşlara sadece uçuş sahibi, Supervisor veya Admin erişebilir.',
-      );
+      final canSeeClosed = role == 'Supervisor' || role == 'Admin';
+      if (!canSeeClosed) {
+        return _Access(
+          allowed: false,
+          reason: 'Bu uçuş kapatılmış. Kapatılmış uçuşlara sadece uçuş sahibi, Supervisor veya Admin erişebilir.',
+        );
+      }
+      return _Access(allowed: true, reason: null);
     }
 
-    if (participants.contains(widget.currentUid)) return _Access(allowed: true, reason: null);
-
-    return _Access(
-      allowed: false,
-      reason: 'Bu uçuşa giriş için davet gerekli (Agent).',
-    );
+    // Open flights are visible to all signed-in users. Write permissions are restricted inside each tab.
+    return _Access(allowed: true, reason: null);
   }
 
   @override
@@ -2177,23 +2179,66 @@ class _ScanTabState extends State<ScanTab> {
     final scannedKeys = _nameKeyVariants(fullName);
     if (scannedKeys.isEmpty) return false;
 
+    bool _fuzzyTokenEq(String a, String b) {
+      final aa = a.trim().toUpperCase();
+      final bb = b.trim().toUpperCase();
+      if (aa.isEmpty || bb.isEmpty) return false;
+      if (aa == bb) return true;
+      final maxLen = aa.length > bb.length ? aa.length : bb.length;
+      if (maxLen <= 3) return false;
+      final dist = _levenshtein(aa, bb);
+      return maxLen >= 8 ? dist <= 2 : dist <= 1;
+    }
+
+    List<String> _tokensFromName(String s) {
+      var up = s.toUpperCase();
+      const titles = ['MR','MRS','MS','MISS','MSTR','MASTER','DR','PROF','SIR','MADAM','INF','INFT','INFANT','CHD','CHILD'];
+      up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+      up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+      up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final toks = up.isEmpty ? <String>[] : up.split(' ').where((t) => t.isNotEmpty).toList();
+      while (toks.isNotEmpty && titles.contains(toks.first)) toks.removeAt(0);
+      while (toks.isNotEmpty && titles.contains(toks.last)) toks.removeLast();
+      return toks;
+    }
+
+    bool _strongNameMatch(String wlName) {
+      final wlKeys = _nameKeyVariants(wlName);
+      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+
+      final st = _tokensFromName(fullName);
+      final wt = _tokensFromName(wlName);
+      if (st.isEmpty || wt.isEmpty) return false;
+
+      final usedW = <int>{};
+      var matched = 0;
+      for (final sTok in st) {
+        for (var i = 0; i < wt.length; i++) {
+          if (usedW.contains(i)) continue;
+          if (_fuzzyTokenEq(sTok, wt[i])) {
+            usedW.add(i);
+            matched++;
+            break;
+          }
+        }
+      }
+
+      if (st.length >= 2 && wt.length >= 2) return matched >= 2;
+
+      final sJoined = st.join('');
+      final wJoined = wt.join('');
+      final maxLen = sJoined.length > wJoined.length ? sJoined.length : wJoined.length;
+      if (maxLen < 6) return false;
+      final ratio = (maxLen - _levenshtein(sJoined, wJoined)) / maxLen;
+      return ratio >= 0.82;
+    }
+
     final snap = await widget.flightRef.collection('watchlist').limit(500).get();
     for (final d in snap.docs) {
       final data = d.data();
       final wlName = (data['fullName'] ?? '').toString();
       if (wlName.trim().isEmpty) continue;
-
-      final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
-      final wlKeys = <String>{};
-      if (stored != null) {
-        for (final v in stored) {
-          if (v is String && v.trim().isNotEmpty) wlKeys.add(v.trim().toUpperCase());
-        }
-      } else {
-        wlKeys.addAll(_nameKeyVariants(wlName));
-      }
-
-      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+      if (_strongNameMatch(wlName)) return true;
     }
     return false;
   }
@@ -2964,15 +3009,6 @@ class _ScanTabState extends State<ScanTab> {
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton.icon(
-                            onPressed: _inviteUser,
-                            icon: const Icon(Icons.person_add_alt_1),
-                            label: const Text('Kullanıcı Davet Et (max 7)'),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
                         Row(
                           children: [
                             Expanded(
@@ -3143,6 +3179,28 @@ class PaxListTab extends StatefulWidget {
 class _PaxListTabState extends State<PaxListTab> {
   String _q = '';
 
+  int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    final curr = List<int>.filled(b.length + 1, 0);
+    for (int i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      for (int j = 1; j <= b.length; j++) {
+        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+        final del = prev[j] + 1;
+        final ins = curr[j - 1] + 1;
+        final sub = prev[j - 1] + cost;
+        curr[j] = [del, ins, sub].reduce((x, y) => x < y ? x : y);
+      }
+      for (int j = 0; j <= b.length; j++) {
+        prev[j] = curr[j];
+      }
+    }
+    return prev[b.length];
+  }
+
   @override
   Widget build(BuildContext context) {
     final stream = widget.flightRef.collection('pax').orderBy('fullName').snapshots();
@@ -3275,24 +3333,66 @@ class _PaxListTabState extends State<PaxListTab> {
     final scannedKeys = _nameKeyVariants(fullName);
     if (scannedKeys.isEmpty) return false;
 
+    bool _fuzzyTokenEq(String a, String b) {
+      final aa = a.trim().toUpperCase();
+      final bb = b.trim().toUpperCase();
+      if (aa.isEmpty || bb.isEmpty) return false;
+      if (aa == bb) return true;
+      final maxLen = aa.length > bb.length ? aa.length : bb.length;
+      if (maxLen <= 3) return false;
+      final dist = _levenshtein(aa, bb);
+      return maxLen >= 8 ? dist <= 2 : dist <= 1;
+    }
+
+    List<String> _tokensFromName(String s) {
+      var up = s.toUpperCase();
+      const titles = ['MR','MRS','MS','MISS','MSTR','MASTER','DR','PROF','SIR','MADAM','INF','INFT','INFANT','CHD','CHILD'];
+      up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+      up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+      up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final toks = up.isEmpty ? <String>[] : up.split(' ').where((t) => t.isNotEmpty).toList();
+      while (toks.isNotEmpty && titles.contains(toks.first)) toks.removeAt(0);
+      while (toks.isNotEmpty && titles.contains(toks.last)) toks.removeLast();
+      return toks;
+    }
+
+    bool _strongNameMatch(String wlName) {
+      final wlKeys = _nameKeyVariants(wlName);
+      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+
+      final st = _tokensFromName(fullName);
+      final wt = _tokensFromName(wlName);
+      if (st.isEmpty || wt.isEmpty) return false;
+
+      final usedW = <int>{};
+      var matched = 0;
+      for (final sTok in st) {
+        for (var i = 0; i < wt.length; i++) {
+          if (usedW.contains(i)) continue;
+          if (_fuzzyTokenEq(sTok, wt[i])) {
+            usedW.add(i);
+            matched++;
+            break;
+          }
+        }
+      }
+
+      if (st.length >= 2 && wt.length >= 2) return matched >= 2;
+
+      final sJoined = st.join('');
+      final wJoined = wt.join('');
+      final maxLen = sJoined.length > wJoined.length ? sJoined.length : wJoined.length;
+      if (maxLen < 6) return false;
+      final ratio = (maxLen - _levenshtein(sJoined, wJoined)) / maxLen;
+      return ratio >= 0.82;
+    }
+
     final snap = await widget.flightRef.collection('watchlist').limit(500).get();
     for (final d in snap.docs) {
       final data = d.data();
       final wlName = (data['fullName'] ?? '').toString();
       if (wlName.trim().isEmpty) continue;
-
-      // Prefer precomputed keys if present
-      final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
-      final wlKeys = <String>{};
-      if (stored != null) {
-        for (final v in stored) {
-          if (v is String && v.trim().isNotEmpty) wlKeys.add(v.trim().toUpperCase());
-        }
-      } else {
-        wlKeys.addAll(_nameKeyVariants(wlName));
-      }
-
-      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
+      if (_strongNameMatch(wlName)) return true;
     }
     return false;
   }
