@@ -338,23 +338,55 @@ class AuthGate extends StatelessWidget {
 class _Splash extends StatelessWidget {
   const _Splash();
 
+  static const String _logoAssetPath = 'assets/company_logo.png';
+
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       body: Center(
         child: _GlassPanel(
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            children: const [
-              Icon(Icons.local_airport_rounded, size: 38),
-              SizedBox(height: 10),
-              Text(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  width: 84,
+                  height: 84,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: cs.outline.withOpacity(.18)),
+                  ),
+                  child: Image.asset(
+                    _logoAssetPath,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Icon(
+                      Icons.local_airport_rounded,
+                      size: 38,
+                      color: cs.primary,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
                 'GOZEN BOARDING PRO',
                 style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: .6),
               ),
-              SizedBox(height: 12),
-              SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(height: 4),
+              Text(
+                'Crew Operations',
+                style: TextStyle(
+                  fontSize: 12,
+                  letterSpacing: .35,
+                  color: cs.onSurface.withOpacity(.70),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
             ],
           ),
         ),
