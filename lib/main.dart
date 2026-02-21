@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:firebase_core/firebase_core.dart';
@@ -895,6 +896,77 @@ class InvitesScreen extends StatelessWidget {
   }
 }
 
+
+bool _isFlightClosedVisible(Map<String, dynamic> data) {
+  final closed = (data['closed'] ?? false) == true;
+  if (!closed) return false;
+
+  DateTime? refTime;
+  final opTimes = Map<String, dynamic>.from(data['opTimes'] ?? const {});
+  final atdIso = (opTimes['ATD'] ?? '').toString();
+  if (atdIso.isNotEmpty) {
+    try {
+      refTime = DateTime.parse(atdIso);
+    } catch (_) {}
+  }
+  final closedAtTs = data['closedAt'];
+  if (refTime == null && closedAtTs is Timestamp) {
+    refTime = closedAtTs.toDate();
+  }
+  if (refTime == null) return false;
+  return DateTime.now().difference(refTime).inHours < 24;
+}
+
+Widget _flightTile({
+  required BuildContext context,
+  required QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  required String uid,
+  required String role,
+  required String subtitle,
+  required bool allowOpen,
+}) {
+  final data = doc.data();
+  final code = (data['flightCode'] ?? '').toString();
+  final booked = (data['bookedPax'] ?? 0).toString();
+  final closed = (data['closed'] ?? false) == true;
+  String atdLabel = '';
+  if (_isFlightClosedVisible(data)) {
+    final opTimes = Map<String, dynamic>.from(data['opTimes'] ?? const {});
+    final atdIso = (opTimes['ATD'] ?? '').toString();
+    if (atdIso.isNotEmpty) {
+      try {
+        atdLabel = DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(atdIso));
+      } catch (_) {
+        atdLabel = atdIso;
+      }
+    }
+  }
+
+  return ListTile(
+    title: Text('$code  •  Booked: $booked'),
+    subtitle: Text(atdLabel.isEmpty ? subtitle : '$subtitle\nATD: $atdLabel'),
+    isThreeLine: atdLabel.isNotEmpty,
+    trailing: FilledButton(
+      onPressed: !allowOpen
+          ? null
+          : () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => FlightDetailScreen(
+                    flightId: doc.id,
+                    currentUid: uid,
+                    forceAllow: role == 'Supervisor' || role == 'Admin',
+                  ),
+                ),
+              );
+            },
+      child: Text(closed ? 'İncele' : 'Katıl'),
+    ),
+  );
+}
+
+
 class FlightsList extends StatelessWidget {
   final String uid;
   final String role;
@@ -903,76 +975,88 @@ class FlightsList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // For Supervisor: show last 50 flights (simple). For Agents: only owner or participant.
-    Query<Map<String, dynamic>> q;
-    if (role == 'Supervisor') {
-      q = Db.flights().orderBy('createdAt', descending: true).limit(50);
-    } else {
-      // Firestore limitation: cannot OR owner==uid OR array-contains uid in one query easily.
-      // We do two queries and merge client-side.
-      return _MergedAgentFlights(uid: uid);
-    }
+    if (role == 'Supervisor' || role == 'Admin') {
+      final q = Db.flights().orderBy('createdAt', descending: true).limit(100);
 
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: q.snapshots(),
-      builder: (context, snap) {
-        final docs = snap.data?.docs ?? [];
-        if (docs.isEmpty) {
-          return const Center(child: Text('Henüz uçuş yok.'));
-        }
-        return ListView.separated(
-          itemCount: docs.length,
-          separatorBuilder: (_, __) => const Divider(height: 1),
-          itemBuilder: (context, i) {
-            final doc = docs[i];
-            final data = doc.data();
-            final code = (data['flightCode'] ?? '').toString();
-            final booked = (data['bookedPax'] ?? 0).toString();
-            final ownerUid = (data['ownerUid'] ?? '').toString();
-            final isOwner = ownerUid == uid;
+      return DefaultTabController(
+        length: 2,
+        child: Column(
+          children: [
+            const TabBar(
+              tabs: [
+                Tab(text: 'Açık Uçuşlar'),
+                Tab(text: 'Kapatılmış Uçuşlar'),
+              ],
+            ),
+            Expanded(
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: q.snapshots(),
+                builder: (context, snap) {
+                  final all = snap.data?.docs ?? [];
+                  final openDocs = all.where((d) => (d.data()['closed'] ?? false) != true).toList();
+                  final closedDocs = all.where((d) => _isFlightClosedVisible(d.data())).toList();
 
-            return ListTile(
-              title: Text('$code  •  Booked: $booked'),
-              subtitle: Text(isOwner ? 'Sahibi sensin' : 'Supervisor erişimi'),
-              trailing: FilledButton(
-                onPressed: () async {
-                  // Supervisor can enter without invite, agents need owner/participant.
-                  await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => FlightDetailScreen(
-                        flightId: doc.id,
-                        currentUid: uid,
-                        forceAllow: role == 'Supervisor',
-                      ),
-                    ),
+                  Widget buildList(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs, {required bool closed}) {
+                    if (docs.isEmpty) {
+                      return Center(child: Text(closed ? 'Kapatılmış uçuş yok (24 saat).' : 'Açık uçuş yok.'));
+                    }
+                    return ListView.separated(
+                      itemCount: docs.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, i) {
+                        final doc = docs[i];
+                        final data = doc.data();
+                        final ownerUid = (data['ownerUid'] ?? '').toString();
+                        final isOwner = ownerUid == uid;
+                        return _flightTile(
+                          context: context,
+                          doc: doc,
+                          uid: uid,
+                          role: role,
+                          subtitle: closed
+                              ? (isOwner ? 'Sahibi sensin • Kapatılmış' : 'Supervisor/Admin erişimi • Kapatılmış')
+                              : (isOwner ? 'Sahibi sensin' : 'Supervisor/Admin erişimi'),
+                          allowOpen: true,
+                        );
+                      },
+                    );
+                  }
+
+                  return TabBarView(
+                    children: [
+                      buildList(openDocs, closed: false),
+                      buildList(closedDocs, closed: true),
+                    ],
                   );
                 },
-                child: const Text('Katıl'),
               ),
-            );
-          },
-        );
-      },
-    );
+            ),
+          ],
+        ),
+      );
+    }
+
+    return _MergedAgentFlights(uid: uid, role: role);
   }
 }
 
+
 class _MergedAgentFlights extends StatelessWidget {
   final String uid;
-  const _MergedAgentFlights({required this.uid});
+  final String role;
+  const _MergedAgentFlights({required this.uid, required this.role});
 
   @override
   Widget build(BuildContext context) {
     final ownedQ = Db.flights()
         .where('ownerUid', isEqualTo: uid)
         .orderBy('createdAt', descending: true)
-        .limit(50);
+        .limit(100);
 
     final partQ = Db.flights()
         .where('participants', arrayContains: uid)
         .orderBy('createdAt', descending: true)
-        .limit(50);
+        .limit(100);
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: ownedQ.snapshots(),
@@ -983,8 +1067,9 @@ class _MergedAgentFlights extends StatelessWidget {
             final owned = snapOwned.data?.docs ?? [];
             final part = snapPart.data?.docs ?? [];
             final map = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
-            for (final d in owned) map[d.id] = d;
-            for (final d in part) map[d.id] = d;
+            for (final d in owned) { map[d.id] = d; }
+            for (final d in part) { map[d.id] = d; }
+
             final docs = map.values.toList()
               ..sort((a, b) {
                 final at = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
@@ -992,49 +1077,75 @@ class _MergedAgentFlights extends StatelessWidget {
                 return bt.compareTo(at);
               });
 
-            if (docs.isEmpty) {
-              return const Center(
-                child: Text('Henüz erişebildiğin uçuş yok. Davet bekliyor olabilirsin.'),
+            final openDocs = docs.where((d) => (d.data()['closed'] ?? false) != true).toList();
+            final closedDocs = docs.where((d) {
+              final data = d.data();
+              if (!_isFlightClosedVisible(data)) return false;
+              final ownerUid = (data['ownerUid'] ?? '').toString();
+              return ownerUid == uid;
+            }).toList();
+
+            Widget buildList(List<QueryDocumentSnapshot<Map<String, dynamic>>> list, {required bool closed}) {
+              if (list.isEmpty) {
+                return Center(
+                  child: Text(
+                    closed
+                        ? 'Kapatılmış uçuş yok (24 saat) veya erişimin yok.'
+                        : 'Henüz erişebildiğin açık uçuş yok. Davet bekliyor olabilirsin.',
+                  ),
+                );
+              }
+
+              return ListView.separated(
+                itemCount: list.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, i) {
+                  final doc = list[i];
+                  final data = doc.data();
+                  final ownerUid = (data['ownerUid'] ?? '').toString();
+                  final isOwner = ownerUid == uid;
+                  final isParticipant = List<String>.from(data['participants'] ?? []).contains(uid);
+
+                  final subtitle = closed
+                      ? 'Kapatılmış uçuş • Sadece sahip erişebilir'
+                      : (isOwner
+                          ? 'Sahibi sensin'
+                          : isParticipant
+                              ? 'Davetli katılımcı'
+                              : '—');
+
+                  return _flightTile(
+                    context: context,
+                    doc: doc,
+                    uid: uid,
+                    role: role,
+                    subtitle: subtitle,
+                    allowOpen: !closed || isOwner,
+                  );
+                },
               );
             }
 
-            return ListView.separated(
-              itemCount: docs.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, i) {
-                final doc = docs[i];
-                final data = doc.data();
-                final code = (data['flightCode'] ?? '').toString();
-                final booked = (data['bookedPax'] ?? 0).toString();
-                final ownerUid = (data['ownerUid'] ?? '').toString();
-                final isOwner = ownerUid == uid;
-                final isParticipant =
-                    List<String>.from(data['participants'] ?? []).contains(uid);
-
-                return ListTile(
-                  title: Text('$code  •  Booked: $booked'),
-                  subtitle: Text(isOwner
-                      ? 'Sahibi sensin'
-                      : isParticipant
-                          ? 'Davetli katılımcı'
-                          : '—'),
-                  trailing: FilledButton(
-                    onPressed: () async {
-                      await Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => FlightDetailScreen(
-                            flightId: doc.id,
-                            currentUid: uid,
-                            forceAllow: false,
-                          ),
-                        ),
-                      );
-                    },
-                    child: const Text('Katıl'),
+            return DefaultTabController(
+              length: 2,
+              child: Column(
+                children: [
+                  const TabBar(
+                    tabs: [
+                      Tab(text: 'Açık Uçuşlar'),
+                      Tab(text: 'Kapatılmış Uçuşlar'),
+                    ],
                   ),
-                );
-              },
+                  Expanded(
+                    child: TabBarView(
+                      children: [
+                        buildList(openDocs, closed: false),
+                        buildList(closedDocs, closed: true),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             );
           },
         );
@@ -1063,6 +1174,24 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
   final List<String> _watchlistNames = [];
 
   bool _busy = false;
+  bool _nightMode = false;
+  DateTime? _etdDate;
+
+
+  Future<void> _pickEtdDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _etdDate ?? now,
+      firstDate: DateTime(now.year - 1),
+      lastDate: DateTime(now.year + 2),
+      helpText: 'ETD Tarihi Seç',
+    );
+    if (picked != null && mounted) {
+      setState(() => _etdDate = DateTime(picked.year, picked.month, picked.day));
+    }
+  }
+
   String? _err;
 
   @override
@@ -1154,6 +1283,9 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
       }
 
       final booked = int.tryParse(_bookedPax.text.trim()) ?? 0;
+      if (_etdDate == null) {
+        throw Exception('Lütfen uçuşun ETD tarihini seçin.');
+      }
 
       final flightRef = Db.flights().doc();
       final now = FieldValue.serverTimestamp();
@@ -1166,6 +1298,9 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
           'participants': <String>[],
           'createdAt': now,
           'offlineMode': false,
+          'nightMode': _nightMode,
+          'etdDate': Timestamp.fromDate(_etdDate!),
+          'etdDateText': DateFormat('yyyy-MM-dd').format(_etdDate!),
           'opTimes': <String, dynamic>{},
         });
 
@@ -1200,7 +1335,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
           'type': 'FLIGHT_CREATED',
           'byUid': widget.uid,
           'at': now,
-          'meta': {'paxCount': _paxDrafts.length, 'watchlistCount': _watchlistNames.length},
+          'meta': {'paxCount': _paxDrafts.length, 'watchlistCount': _watchlistNames.length, 'etdDate': DateFormat('yyyy-MM-dd').format(_etdDate!)},
         });
       });
 
@@ -1238,6 +1373,27 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
                     keyboardType: TextInputType.number,
                   ),
                   const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.event),
+                    title: Text(_etdDate == null
+                        ? 'ETD Tarihi Seçilmedi'
+                        : 'ETD: ${DateFormat('yyyy-MM-dd').format(_etdDate!)}'),
+                    subtitle: const Text('Uçuşun ETD olarak gerçekleşeceği tarih baz alınmalıdır.'),
+                    trailing: FilledButton.tonal(
+                      onPressed: _pickEtdDate,
+                      child: const Text('Tarih Seç'),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: _nightMode,
+                    onChanged: (v) => setState(() => _nightMode = v),
+                    title: const Text('Gece Modu'),
+                    subtitle: const Text('Sadece uçuş oluştururken seçilir.'),
+                  ),
+                  const SizedBox(height: 4),
                   Row(
                     children: [
                       Expanded(
@@ -1255,28 +1411,12 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
                     onRemove: (i) => setState(() => _watchlistNames.removeAt(i)),
                   ),
                   const Divider(height: 28),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: _addPaxDialog,
-                          icon: const Icon(Icons.group_add),
-                          label: const Text('Yolcu Ekle'),
-                        ),
-                      ),
-                    ],
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.group_off_outlined),
+                    title: const Text('Yolcu Ekle kaldırıldı'),
+                    subtitle: const Text('Yolcu listesi scan/manüel boarding sırasında oluşur.'),
                   ),
-                  const SizedBox(height: 8),
-                  Text('Yolcu sayısı: ${_paxDrafts.length}'),
-                  const SizedBox(height: 8),
-                  ..._paxDrafts.map((p) => ListTile(
-                        title: Text(p.fullName.isEmpty ? '—' : p.fullName),
-                        subtitle: Text('Seat: ${p.seat}  •  PNR: ${p.pnr.isEmpty ? "—" : p.pnr}'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () => setState(() => _paxDrafts.remove(p)),
-                        ),
-                      )),
                 ],
               ),
             ),
@@ -1373,9 +1513,19 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
     final owner = (data['ownerUid'] ?? '').toString();
     final participants = List<String>.from(data['participants'] ?? []);
 
+    final isClosed = (data['closed'] ?? false) == true;
+
     if (widget.forceAllow) return _Access(allowed: true, reason: null);
 
     if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
+
+    if (isClosed) {
+      return _Access(
+        allowed: false,
+        reason: 'Bu uçuş kapatılmış. Kapatılmış uçuşlara sadece uçuş sahibi, Supervisor veya Admin erişebilir.',
+      );
+    }
+
     if (participants.contains(widget.currentUid)) return _Access(allowed: true, reason: null);
 
     return _Access(
@@ -1477,15 +1627,22 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
                     ),
                   ),
                 ),
-                body: TabBarView(
+                body: Column(
                   children: [
-                    ScanTab(flightRef: flightRef, currentUid: widget.currentUid),
-                    PaxListTab(flightRef: flightRef, currentUid: widget.currentUid),
-                    WatchlistTab(flightRef: flightRef, currentUid: widget.currentUid),
-                    StaffTab(flightRef: flightRef),
-                    EquipmentTab(flightRef: flightRef),
-                    OpTimesTab(flightRef: flightRef, currentUid: widget.currentUid),
-                    ReportTab(flightRef: flightRef, currentUid: widget.currentUid),
+                    _FlightOpsHeader(flightRef: flightRef, currentUid: widget.currentUid),
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          ScanTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          PaxListTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          WatchlistTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          StaffTab(flightRef: flightRef),
+                          EquipmentTab(flightRef: flightRef),
+                          OpTimesTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          ReportTab(flightRef: flightRef, currentUid: widget.currentUid),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1496,6 +1653,73 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
     );
   }
 }
+
+
+class _FlightOpsHeader extends StatefulWidget {
+  final DocumentReference<Map<String, dynamic>> flightRef;
+  final String currentUid;
+  const _FlightOpsHeader({required this.flightRef, required this.currentUid});
+
+  @override
+  State<_FlightOpsHeader> createState() => _FlightOpsHeaderState();
+}
+
+class _FlightOpsHeaderState extends State<_FlightOpsHeader> {
+  Future<String> _emailOf(String uid) async {
+    final s = await Db.userDoc(uid).get();
+    return (s.data()?['email'] ?? '').toString();
+  }
+
+  Future<void> _logOffline(bool v) async {
+    await widget.flightRef.collection('logs').add({
+      'type': 'OFFLINE_MODE_TOGGLED',
+      'byUid': widget.currentUid,
+      'byEmail': await _emailOf(widget.currentUid),
+      'at': FieldValue.serverTimestamp(),
+      'meta': {'value': v, 'etdDate': ((await widget.flightRef.get()).data()?['etdDateText'] ?? '').toString()},
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: widget.flightRef.snapshots(),
+      builder: (context, snap) {
+        final data = snap.data?.data() ?? <String, dynamic>{};
+        final offline = (data['offlineMode'] ?? false) == true;
+        final etdText = (data['etdDateText'] ?? '').toString();
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: _GlassPanel(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_off, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    etdText.isEmpty ? 'Operasyon Ayarları' : 'Operasyon Ayarları • ETD $etdText',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                  ),
+                ),
+                const Text('Offline', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 6),
+                Switch(
+                  value: offline,
+                  onChanged: (v) async {
+                    await widget.flightRef.set({'offlineMode': v}, SetOptions(merge: true));
+                    await _logOffline(v);
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 
 class _Access {
   final bool allowed;
@@ -1549,7 +1773,6 @@ class ScanTab extends StatefulWidget {
 
 class _ScanTabState extends State<ScanTab> {
   bool _offline = false;
-  bool _night = false;
 
   final _manualScan = TextEditingController();
   bool _busy = false;
@@ -1846,15 +2069,34 @@ class _ScanTabState extends State<ScanTab> {
     return (s.data()?['email'] ?? '').toString();
   }
 
+  Future<String> _etdText() async {
+    final s = await widget.flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
   Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
     await widget.flightRef.collection('logs').add({
       'type': type,
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': meta ?? {},
+      'meta': {...?meta, 'etdDate': await _etdText()},
     });
   }
+
+  Future<void> _autoMarkOpTimesForBoarding() async {
+    final snap = await widget.flightRef.get();
+    final data = snap.data() ?? {};
+    final opTimes = Map<String, dynamic>.from(data['opTimes'] ?? const {});
+    final nowIso = DateTime.now().toIso8601String();
+
+    opTimes['ILK_YOLCU_MURACAAT'] ??= nowIso;
+    opTimes['SON_YOLCU_MURACAAT'] = nowIso;
+    opTimes['BOARDING_STARTED'] ??= nowIso;
+
+    await widget.flightRef.set({'opTimes': opTimes}, SetOptions(merge: true));
+  }
+
 
   Future<bool> _isWatchlistMatch(String fullName) async {
     final scannedKeys = _nameKeyVariants(fullName);
@@ -1928,11 +2170,66 @@ class _ScanTabState extends State<ScanTab> {
     return keys;
   }
 
+  Future<void> _alertVibrate([int count = 2]) async {
+    for (var i = 0; i < count; i++) {
+      await HapticFeedback.heavyImpact();
+      await Future.delayed(const Duration(milliseconds: 90));
+    }
+  }
+
+  Future<void> _showCriticalGateBlockScreen({required String expected, required String got}) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => Dialog(
+        insetPadding: EdgeInsets.zero,
+        backgroundColor: Colors.black,
+        child: SizedBox.expand(
+          child: Container(
+            color: Colors.black,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  'YANLIŞ YOLCU\nGATE\'E KABUL ETME',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w900,
+                    height: 1.15,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Beklenen: $expected\nOkunan: $got',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showResultScreen({
     required Color bg,
     required String title,
     String? subtitle,
   }) async {
+    final fg = bg.computeLuminance() < 0.35 ? Colors.white : Colors.black;
     await showDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -1947,7 +2244,8 @@ class _ScanTabState extends State<ScanTab> {
               Text(
                 title,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
+                style: TextStyle(
+                  color: fg,
                   fontSize: 22,
                   fontWeight: FontWeight.w800,
                 ),
@@ -1957,7 +2255,8 @@ class _ScanTabState extends State<ScanTab> {
                 Text(
                   subtitle,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
+                  style: TextStyle(
+                    color: fg,
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
                   ),
@@ -2003,7 +2302,12 @@ class _ScanTabState extends State<ScanTab> {
     if (!ok) {
       final exp = _normalizeFlightCode(fCode);
       final got = _normalizeFlightCode(flightCode.isNotEmpty ? flightCode : flightCodeRaw);
-      throw Exception('Uçuş kodu eşleşmedi. Beklenen: $exp / Okunan: $got');
+      await _log('PAX_WRONG_FLIGHT_SCAN_BLOCKED', meta: {'expected': exp, 'got': got, 'raw': _truncate(raw, 220)});
+      await _alertVibrate(3);
+      if (mounted) {
+        await _showCriticalGateBlockScreen(expected: exp, got: got);
+      }
+      return;
     }
 
 // Offer Pre-BOARD vs DFT Random
@@ -2068,6 +2372,7 @@ class _ScanTabState extends State<ScanTab> {
         'boardedByEmail': byEmail,
       }, SetOptions(merge: true));
 
+      await _autoMarkOpTimesForBoarding();
       await _log('PAX_PREBOARDED', meta: {'fullName': fullName, 'seat': seat});
 
       await _showResultScreen(
@@ -2082,9 +2387,11 @@ class _ScanTabState extends State<ScanTab> {
         'boardedByEmail': byEmail,
       }, SetOptions(merge: true));
 
+      await _autoMarkOpTimesForBoarding();
       await _log('PAX_RANDOM_SELECTED', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl});
 
       if (isWl) {
+        await _alertVibrate(3);
         await _showResultScreen(
           bg: Colors.red,
           title: 'FLY PASSANGER ATTANTION!!!',
@@ -2121,6 +2428,7 @@ class _ScanTabState extends State<ScanTab> {
     });
 
     if (!mounted) return true;
+    await _alertVibrate(3);
     await _showResultScreen(
       bg: Colors.orange,
       title: 'MUKERRER KART',
@@ -2217,8 +2525,11 @@ class _ScanTabState extends State<ScanTab> {
           'boardedAt': FieldValue.serverTimestamp(),
           'boardedByUid': widget.currentUid,
           'boardedByEmail': byEmail,
+          'manualBoarded': true,
+          'manualBoardedByEmail': byEmail,
         }, SetOptions(merge: true));
-        await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': fullName, 'seat': seat});
+      await _autoMarkOpTimesForBoarding();
+      await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': fullName, 'seat': seat, 'manuallyBoardedBy': byEmail});
         await _showResultScreen(bg: Colors.green, title: 'PRE-BOARD SUCCESSFULL');
       } else {
         await selected.reference.set({
@@ -2226,9 +2537,13 @@ class _ScanTabState extends State<ScanTab> {
           'boardedAt': FieldValue.serverTimestamp(),
           'boardedByUid': widget.currentUid,
           'boardedByEmail': byEmail,
+          'manualBoarded': true,
+          'manualBoardedByEmail': byEmail,
         }, SetOptions(merge: true));
-        await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl});
+      await _autoMarkOpTimesForBoarding();
+      await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl, 'manuallyBoardedBy': byEmail});
         if (isWl) {
+          await _alertVibrate(3);
           await _showResultScreen(
             bg: Colors.red,
             title: 'FLY PASSANGER ATTANTION!!!',
@@ -2254,12 +2569,27 @@ class _ScanTabState extends State<ScanTab> {
     final fSnap = await widget.flightRef.get();
     final ownerUid = (fSnap.data()?['ownerUid'] ?? '').toString();
 
-    final canInvite = myRole == 'Supervisor' || ownerUid == widget.currentUid;
+    final canInvite = ownerUid == widget.currentUid || myRole == 'Supervisor' || myRole == 'Admin';
 
     if (!canInvite) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sadece uçuş sahibi veya Supervisor davet gönderebilir.')),
+        const SnackBar(content: Text('Sadece uçuş sahibi Agent, Supervisor veya Admin davet gönderebilir.')),
+      );
+      return;
+    }
+
+    final participants = ((fSnap.data()?['participants'] as List?) ?? const []).length;
+    final pendingInvites = (await Db.invites()
+            .where('flightId', isEqualTo: widget.flightRef.id)
+            .where('status', isEqualTo: 'PENDING')
+            .get())
+        .docs
+        .length;
+    if (participants + pendingInvites >= 7) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Bu uçuş için en fazla 7 kullanıcı davet edilebilir.')),
       );
       return;
     }
@@ -2268,7 +2598,7 @@ class _ScanTabState extends State<ScanTab> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Kullanıcı Davet Et (Agent)'),
+        title: const Text('Kullanıcı Davet Et'),
         content: TextField(
           controller: emailC,
           decoration: const InputDecoration(labelText: 'Kullanıcı email'),
@@ -2372,19 +2702,13 @@ class _ScanTabState extends State<ScanTab> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
-                SwitchListTile(
-                  value: _offline,
-                  onChanged: _toggleOffline,
-                  title: const Text('Offline Mode'),
-                  subtitle: const Text('Offline mode (şimdilik flag).'),
-                ),
-                SwitchListTile(
-                  value: _night,
-                  onChanged: (v) async {
-                    setState(() => _night = v);
-                    await _log('NIGHT_MODE_TOGGLED', meta: {'value': v});
-                  },
-                  title: const Text('Gece Modu (bu sekme içi)'),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _inviteUser,
+                    icon: const Icon(Icons.person_add_alt_1),
+                    label: const Text('Kullanıcı Davet Et (max 7)'),
+                  ),
                 ),
                 const Divider(height: 24),
                 SizedBox(
@@ -2568,6 +2892,7 @@ class _PaxListTabState extends State<PaxListTab> {
     final status = (data['status'] ?? 'NONE').toString();
 
     final boardedBy = (data['boardedByEmail'] ?? '').toString();
+    final manualBoardedBy = (data['manualBoardedByEmail'] ?? '').toString();
     final offBy = (data['offloadedByEmail'] ?? '').toString();
 
     DateTime? boardedAt;
@@ -2585,6 +2910,7 @@ class _PaxListTabState extends State<PaxListTab> {
       subtitle: Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}\n'
           'Status: $status\n'
           'Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}\n'
+          '${manualBoardedBy.isNotEmpty ? "Manually boarded by: $manualBoardedBy\\n" : ""}'
           'Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}'),
       isThreeLine: true,
       trailing: PopupMenuButton<String>(
@@ -2680,15 +3006,34 @@ class _PaxListTabState extends State<PaxListTab> {
     return keys;
   }
 
+  Future<String> _etdText() async {
+    final s = await widget.flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
   Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
     await widget.flightRef.collection('logs').add({
       'type': type,
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': meta ?? {},
+      'meta': {...?meta, 'etdDate': await _etdText()},
     });
   }
+
+  Future<void> _autoMarkOpTimesForBoarding() async {
+    final snap = await widget.flightRef.get();
+    final data = snap.data() ?? {};
+    final opTimes = Map<String, dynamic>.from(data['opTimes'] ?? const {});
+    final nowIso = DateTime.now().toIso8601String();
+
+    opTimes['ILK_YOLCU_MURACAAT'] ??= nowIso;
+    opTimes['SON_YOLCU_MURACAAT'] = nowIso;
+    opTimes['BOARDING_STARTED'] ??= nowIso;
+
+    await widget.flightRef.set({'opTimes': opTimes}, SetOptions(merge: true));
+  }
+
 
   Future<void> _manualBoard(QueryDocumentSnapshot<Map<String, dynamic>> paxDoc) async {
     final data = paxDoc.data();
@@ -2724,16 +3069,22 @@ class _PaxListTabState extends State<PaxListTab> {
         'boardedAt': FieldValue.serverTimestamp(),
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
+        'manualBoarded': true,
+        'manualBoardedByEmail': byEmail,
       }, SetOptions(merge: true));
-      await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': name, 'seat': seat});
+      await _autoMarkOpTimesForBoarding();
+      await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': name, 'seat': seat, 'manuallyBoardedBy': byEmail});
     } else {
       await paxDoc.reference.set({
         'status': 'DFT_BOARDED',
         'boardedAt': FieldValue.serverTimestamp(),
         'boardedByUid': widget.currentUid,
         'boardedByEmail': byEmail,
+        'manualBoarded': true,
+        'manualBoardedByEmail': byEmail,
       }, SetOptions(merge: true));
-      await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': name, 'seat': seat, 'watchlistMatch': isWl});
+      await _autoMarkOpTimesForBoarding();
+      await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': name, 'seat': seat, 'watchlistMatch': isWl, 'manuallyBoardedBy': byEmail});
     }
   }
 
@@ -2849,13 +3200,18 @@ class WatchlistTab extends StatelessWidget {
     return (s.data()?['email'] ?? '').toString();
   }
 
+  Future<String> _etdText() async {
+    final s = await flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
   Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
     await flightRef.collection('logs').add({
       'type': type,
       'byUid': currentUid,
       'byEmail': await _emailOf(currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': meta ?? {},
+      'meta': {...?meta, 'etdDate': await _etdText()},
     });
   }
 
@@ -3204,6 +3560,7 @@ class OpTimesTab extends StatefulWidget {
   State<OpTimesTab> createState() => _OpTimesTabState();
 }
 
+
 class _OpTimesTabState extends State<OpTimesTab> {
   static const fields = [
     'ETA',
@@ -3223,10 +3580,56 @@ class _OpTimesTabState extends State<OpTimesTab> {
     return Map<String, dynamic>.from(snap.data()?['opTimes'] ?? {});
   }
 
-  Future<void> _setField(String key, DateTime? value) async {
+  String _prettyField(String key) {
+    const labels = {
+      'ETA': 'ETA',
+      'ATA': 'ATA',
+      'ETD': 'ETD',
+      'ATD': 'ATD',
+      'BOARDING_STARTED': 'BOARDING STARTED',
+      'BOARDING_FINISHED': 'BOARDING FINISHED',
+      'OPERATION_FINISHED': 'OPERATION FINISHED',
+      'ILK_YOLCU_MURACAAT': 'İLK YOLCU MÜRACAAT',
+      'SON_YOLCU_MURACAAT': 'SON YOLCU MÜRACAAT',
+      'GATE_TAHSIS_SAATI': 'GATE TAHSİS SAATİ',
+    };
+    return labels[key] ?? key;
+  }
+
+  Future<void> _setFieldWithRules(String key, DateTime? value) async {
+    if (key == 'OPERATION_FINISHED' && value != null) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Uçuşu Kapat'),
+          content: const Text('Operation FINISHED verisi girildi. Uçuş kapatılacaktır, emin misiniz?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet, Kapat')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+
     final map = await _load();
     map[key] = value?.toIso8601String();
-    await widget.flightRef.set({'opTimes': map}, SetOptions(merge: true));
+
+    final payload = <String, dynamic>{'opTimes': map};
+    if (key == 'OPERATION_FINISHED' && value != null) {
+      payload['closed'] = true;
+      payload['closedAt'] = FieldValue.serverTimestamp();
+      payload['closedByUid'] = widget.currentUid;
+    }
+
+    await widget.flightRef.set(payload, SetOptions(merge: true));
+
+    if (!mounted) return;
+    if (key == 'OPERATION_FINISHED' && value != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Uçuş kapatıldı. Kapatılmış uçuşlar sekmesinde 24 saat görünür.')),
+      );
+    }
   }
 
   Future<DateTime?> _pickDateTime(BuildContext context, DateTime? current) async {
@@ -3256,8 +3659,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
         final map = snap.data ?? {};
         String label(String iso) {
           try {
-            final dt = DateTime.parse(iso);
-            return DateFormat('yyyy-MM-dd HH:mm').format(dt);
+            return DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(iso));
           } catch (_) {
             return iso;
           }
@@ -3266,46 +3668,52 @@ class _OpTimesTabState extends State<OpTimesTab> {
         return ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            const Text('Op. Times', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
             const Text(
-              'Op. Times',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              'İlk/Son yolcu müracaat saatleri boarding ile otomatik güncellenir.',
+              style: TextStyle(fontSize: 12),
             ),
             const SizedBox(height: 12),
             for (final f in fields)
-              Card(
-                child: ListTile(
-                  title: Text(f),
-                  subtitle: Text(map[f] == null ? '—' : label(map[f].toString())),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: 'Temizle',
-                        onPressed: () => _setField(f, null),
-                        icon: const Icon(Icons.clear),
-                      ),
-                      IconButton(
-                        tooltip: 'Seç',
-                        onPressed: () async {
-                          final curIso = map[f]?.toString();
-                          DateTime? cur;
-                          if (curIso != null) {
-                            try {
-                              cur = DateTime.parse(curIso);
-                            } catch (_) {}
-                          }
-                          final picked = await _pickDateTime(context, cur);
-                          if (picked != null) await _setField(f, picked);
-                        },
-                        icon: const Icon(Icons.calendar_month),
-                      ),
-                    ],
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: _GlassPanel(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  child: ListTile(
+                    title: Text(_prettyField(f), style: const TextStyle(fontWeight: FontWeight.w700)),
+                    subtitle: Text(map[f] == null ? '—' : label(map[f].toString())),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Temizle',
+                          onPressed: () => _setFieldWithRules(f, null),
+                          icon: const Icon(Icons.clear),
+                        ),
+                        IconButton(
+                          tooltip: 'Seç',
+                          onPressed: () async {
+                            final curIso = map[f]?.toString();
+                            DateTime? cur;
+                            if (curIso != null) {
+                              try {
+                                cur = DateTime.parse(curIso);
+                              } catch (_) {}
+                            }
+                            final picked = await _pickDateTime(context, cur);
+                            if (picked != null) await _setFieldWithRules(f, picked);
+                          },
+                          icon: const Icon(Icons.calendar_month),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
             const Text(
-              'Not: İLK/SON yolcu müracaat saatleri boarding kayıtlarından otomatik türetilebilir. Şimdilik manuel alan.',
+              'Operation FINISHED girildiğinde onay sonrası uçuş kapatılır. Kapatılmış uçuşlar ana ekranda 24 saat görünür.',
               style: TextStyle(fontSize: 12),
             ),
           ],
@@ -3344,13 +3752,18 @@ class _ReportTabState extends State<ReportTab> {
     return (s.data()?['email'] ?? '').toString();
   }
 
+  Future<String> _etdText() async {
+    final s = await widget.flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
   Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
     await widget.flightRef.collection('logs').add({
       'type': type,
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': meta ?? {},
+      'meta': {...?meta, 'etdDate': await _etdText()},
     });
   }
 
