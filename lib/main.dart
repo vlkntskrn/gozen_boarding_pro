@@ -402,6 +402,9 @@ class Db {
   static DocumentReference<Map<String, dynamic>> userDoc(String uid) =>
       fs.collection('users').doc(uid);
 
+  static CollectionReference<Map<String, dynamic>> users() =>
+      fs.collection('users');
+
   static CollectionReference<Map<String, dynamic>> invites() =>
       fs.collection('invites');
 }
@@ -466,15 +469,17 @@ class _LoginScreenState extends State<LoginScreen> {
       final uid = cred.user!.uid;
       final ref = Db.userDoc(uid);
       final snap = await ref.get();
+      final usernameLower = email.split('@').first.trim().toLowerCase();
       if (!snap.exists) {
         await ref.set({
           'email': email,
+          'usernameLower': usernameLower,
           'role': 'Agent', // Agent or Supervisor
           'createdAt': FieldValue.serverTimestamp(),
         });
       } else {
-        // Ensure email updated
-        await ref.set({'email': email}, SetOptions(merge: true));
+        // Ensure email/username updated
+        await ref.set({'email': email, 'usernameLower': usernameLower}, SetOptions(merge: true));
       }
     } catch (e) {
       setState(() => _err = e.toString());
@@ -779,50 +784,64 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 }
 
+
+bool _inviteMatchesUser(Map<String, dynamic> data, {required String uid, required String email, required String usernameLower}) {
+  final inviteeEmail = (data['inviteeEmail'] ?? '').toString().trim().toLowerCase();
+  final inviteeUid = (data['inviteeUid'] ?? '').toString().trim();
+  final inviteeUsername = (data['inviteeUsernameLower'] ?? '').toString().trim().toLowerCase();
+  return (inviteeUid.isNotEmpty && inviteeUid == uid) ||
+      (email.isNotEmpty && inviteeEmail == email.toLowerCase()) ||
+      (usernameLower.isNotEmpty && inviteeUsername == usernameLower);
+}
+
+
 class _PendingInvitesBar extends StatelessWidget {
   final String uid;
   const _PendingInvitesBar({required this.uid});
 
   @override
   Widget build(BuildContext context) {
-    final email = FirebaseAuth.instance.currentUser?.email ?? '';
-    if (email.isEmpty) return const SizedBox.shrink();
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email ?? '';
+    if (user == null) return const SizedBox.shrink();
 
-    final q = Db.invites()
-        .where('inviteeEmail', isEqualTo: email)
-        .where('status', isEqualTo: 'PENDING');
+    final q = Db.invites().where('status', isEqualTo: 'PENDING');
 
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: q.snapshots(),
-      builder: (context, snap) {
-        final docs = snap.data?.docs ?? [];
+    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      future: Db.userDoc(uid).get(),
+      builder: (context, meSnap) {
+        final usernameLower = (meSnap.data?.data()?['usernameLower'] ?? '').toString().toLowerCase();
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: q.snapshots(),
+          builder: (context, snap) {
+            final docs = (snap.data?.docs ?? [])
+                .where((d) => _inviteMatchesUser(d.data(), uid: uid, email: email, usernameLower: usernameLower))
+                .toList();
         if (docs.isEmpty) return const SizedBox.shrink();
 
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: _GlassPanel(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                const Icon(Icons.mark_email_unread_outlined),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text('Bekleyen davet var: ${docs.length}'),
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: _GlassPanel(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.mark_email_unread_outlined),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('Bekleyen davet var: ${docs.length}')),
+                    TextButton(
+                      onPressed: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => InvitesScreen(uid: uid)),
+                        );
+                      },
+                      child: const Text('Görüntüle'),
+                    ),
+                  ],
                 ),
-                TextButton(
-                  onPressed: () async {
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => InvitesScreen(uid: uid),
-                      ),
-                    );
-                  },
-                  child: const Text('Görüntüle'),
-                ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -835,58 +854,63 @@ class InvitesScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final email = FirebaseAuth.instance.currentUser?.email ?? '';
-    final q = Db.invites()
-        .where('inviteeEmail', isEqualTo: email)
-        .where('status', isEqualTo: 'PENDING');
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email ?? '';
+    final q = Db.invites().where('status', isEqualTo: 'PENDING');
 
     return Scaffold(
       appBar: AppBar(title: const Text('Davetler')),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: q.snapshots(),
-        builder: (context, snap) {
-          final docs = snap.data?.docs ?? [];
+      body: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        future: Db.userDoc(uid).get(),
+        builder: (context, meSnap) {
+          final usernameLower = (meSnap.data?.data()?['usernameLower'] ?? '').toString().toLowerCase();
+          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: q.snapshots(),
+            builder: (context, snap) {
+              final docs = (snap.data?.docs ?? [])
+                  .where((d) => _inviteMatchesUser(d.data(), uid: uid, email: email, usernameLower: usernameLower))
+                  .toList();
           if (docs.isEmpty) {
             return const Center(child: Text('Bekleyen davet yok.'));
           }
-          return ListView.separated(
-            itemCount: docs.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, i) {
-              final d = docs[i];
-              final data = d.data();
-              final flightId = (data['flightId'] ?? '').toString();
-              final flightCode = (data['flightCode'] ?? '').toString();
-              return ListTile(
-                title: Text('Uçuş: $flightCode'),
-                subtitle: Text('Flight ID: $flightId'),
-                trailing: FilledButton(
-                  onPressed: () async {
-                    // Accept: add participant UID to flight + mark invite accepted
-                    final flightRef = Db.flights().doc(flightId);
-                    await Db.fs.runTransaction((tx) async {
-                      final fSnap = await tx.get(flightRef);
-                      if (!fSnap.exists) throw Exception('Uçuş bulunamadı.');
-                      final participants =
-                          List<String>.from(fSnap.data()?['participants'] ?? []);
-                      if (!participants.contains(uid)) participants.add(uid);
-                      tx.update(flightRef, {'participants': participants});
-                      tx.update(d.reference, {
-                        'status': 'ACCEPTED',
-                        'acceptedAt': FieldValue.serverTimestamp(),
-                        'acceptedByUid': uid,
-                      });
-                    });
+              return ListView.separated(
+                itemCount: docs.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, i) {
+                  final d = docs[i];
+                  final data = d.data();
+                  final flightId = (data['flightId'] ?? '').toString();
+                  final flightCode = (data['flightCode'] ?? '').toString();
+                  return ListTile(
+                    title: Text('Uçuş: $flightCode'),
+                    subtitle: Text('Flight ID: $flightId'),
+                    trailing: FilledButton(
+                      onPressed: () async {
+                        final flightRef = Db.flights().doc(flightId);
+                        await Db.fs.runTransaction((tx) async {
+                          final fSnap = await tx.get(flightRef);
+                          if (!fSnap.exists) throw Exception('Uçuş bulunamadı.');
+                          final participants = List<String>.from(fSnap.data()?['participants'] ?? []);
+                          if (!participants.contains(uid)) participants.add(uid);
+                          tx.update(flightRef, {'participants': participants});
+                          tx.update(d.reference, {
+                            'status': 'ACCEPTED',
+                            'acceptedAt': FieldValue.serverTimestamp(),
+                            'acceptedByUid': uid,
+                          });
+                        });
 
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Davet kabul edildi.')),
-                      );
-                      Navigator.pop(context);
-                    }
-                  },
-                  child: const Text('Kabul Et'),
-                ),
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Davet kabul edildi.')),
+                          );
+                          Navigator.pop(context);
+                        }
+                      },
+                      child: const Text('Kabul Et'),
+                    ),
+                  );
+                },
               );
             },
           );
@@ -2132,18 +2156,13 @@ class _ScanTabState extends State<ScanTab> {
   Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
     final scannedKeys = _nameKeyVariants(fullName);
     if (scannedKeys.isEmpty) return false;
-    final scanPnr = _normPnr(pnr);
-    if (scanPnr.isEmpty) return false;
 
     final snap = await widget.flightRef.collection('watchlist').limit(500).get();
     for (final d in snap.docs) {
       final data = d.data();
       final wlName = (data['fullName'] ?? '').toString();
       if (wlName.trim().isEmpty) continue;
-      final wlPnr = _normPnr((data['pnr'] ?? '').toString());
-      if (wlPnr.isEmpty) continue;
 
-      // Prefer precomputed keys if present
       final List<dynamic>? stored = data['nameKeys'] is List ? (data['nameKeys'] as List) : null;
       final wlKeys = <String>{};
       if (stored != null) {
@@ -2154,11 +2173,7 @@ class _ScanTabState extends State<ScanTab> {
         wlKeys.addAll(_nameKeyVariants(wlName));
       }
 
-      final nameOk = wlKeys.intersection(scannedKeys).isNotEmpty;
-      if (!nameOk) continue;
-
-      final pnrRatio = _pnrSimilarityRatio(scanPnr, wlPnr);
-      if (pnrRatio >= 0.80) return true;
+      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
     }
     return false;
   }
@@ -2759,7 +2774,7 @@ class _ScanTabState extends State<ScanTab> {
         title: const Text('Kullanıcı Davet Et'),
         content: TextField(
           controller: emailC,
-          decoration: const InputDecoration(labelText: 'Kullanıcı email'),
+          decoration: const InputDecoration(labelText: 'Kullanıcı email veya username'),
           keyboardType: TextInputType.emailAddress,
         ),
         actions: [
@@ -2771,27 +2786,77 @@ class _ScanTabState extends State<ScanTab> {
 
     if (ok != true) return;
 
-    final inviteeEmail = emailC.text.trim();
-    if (inviteeEmail.isEmpty) return;
+    final rawInput = emailC.text.trim();
+    if (rawInput.isEmpty) return;
 
-    final fData = fSnap.data() ?? {};
-    final flightCode = (fData['flightCode'] ?? '').toString();
+    final normalizedInput = rawInput.toLowerCase();
+    final inviteeUsernameLower = normalizedInput.contains('@')
+        ? normalizedInput.split('@').first.trim()
+        : normalizedInput;
 
-    await Db.invites().add({
-      'flightId': widget.flightRef.id,
-      'flightCode': flightCode,
-      'inviteeEmail': inviteeEmail,
-      'status': 'PENDING',
-      'createdAt': FieldValue.serverTimestamp(),
-      'createdByUid': widget.currentUid,
-    });
+    try {
+      String inviteeEmail = normalizedInput;
+      String inviteeUid = '';
+      final userQ = await Db.users().where('usernameLower', isEqualTo: inviteeUsernameLower).limit(1).get();
+      if (userQ.docs.isNotEmpty) {
+        final u = userQ.docs.first;
+        final ud = u.data();
+        inviteeUid = u.id;
+        inviteeEmail = (ud['email'] ?? inviteeEmail).toString().trim().toLowerCase();
+      } else if (!normalizedInput.contains('@')) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Davet gönderilememiştir. Kullanıcı bulunamadı.')),
+          );
+        }
+        return;
+      }
 
-    await _log('INVITE_SENT', meta: {'inviteeEmail': inviteeEmail});
+      final fData = fSnap.data() ?? {};
+      final flightCode = (fData['flightCode'] ?? '').toString();
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Davet gönderildi.')),
-      );
+      final dup = await Db.invites()
+          .where('flightId', isEqualTo: widget.flightRef.id)
+          .where('status', isEqualTo: 'PENDING')
+          .where('inviteeUsernameLower', isEqualTo: inviteeUsernameLower)
+          .limit(1)
+          .get();
+      if (dup.docs.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Davet gönderilememiştir. Bu kullanıcıya bekleyen davet var.')),
+          );
+        }
+        return;
+      }
+
+      await Db.invites().add({
+        'flightId': widget.flightRef.id,
+        'flightCode': flightCode,
+        'inviteeEmail': inviteeEmail,
+        'inviteeUid': inviteeUid,
+        'inviteeUsernameLower': inviteeUsernameLower,
+        'status': 'PENDING',
+        'createdAt': FieldValue.serverTimestamp(),
+        'createdByUid': widget.currentUid,
+      });
+
+      await _log('INVITE_SENT', meta: {
+        'inviteeEmail': inviteeEmail,
+        'inviteeUsernameLower': inviteeUsernameLower,
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Davet gönderilmiştir.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Davet gönderilememiştir.')),
+        );
+      }
     }
   }
 
@@ -3475,19 +3540,11 @@ class WatchlistTab extends StatelessWidget {
   Future<void> _add(BuildContext context) async {
     if (!await _canWrite()) return;
     final cName = TextEditingController();
-    final cPnr = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('WatchList Ekle'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
-            const SizedBox(height: 8),
-            TextField(controller: cPnr, decoration: const InputDecoration(labelText: 'PNR')),
-          ],
-        ),
+        content: TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
@@ -3497,36 +3554,26 @@ class WatchlistTab extends StatelessWidget {
     if (ok != true) return;
 
     final name = cName.text.trim();
-    final pnr = cPnr.text.trim().toUpperCase();
     if (name.isEmpty) return;
 
     await flightRef.collection('watchlist').add({
       'fullName': name,
-      'pnr': pnr,
       'nameKeys': WatchlistTab._buildNameKeys(name),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
-    await _log('WATCHLIST_ADD', meta: {'fullName': name, 'pnr': pnr});
+    await _log('WATCHLIST_ADD', meta: {'fullName': name});
   }
 
   Future<void> _edit(BuildContext context, DocumentReference<Map<String, dynamic>> ref, String current) async {
     if (!await _canWrite()) return;
     final refSnap = await ref.get();
     final cName = TextEditingController(text: current);
-    final cPnr = TextEditingController(text: (refSnap.data()?['pnr'] ?? '').toString());
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('WatchList Düzenle'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
-            const SizedBox(height: 8),
-            TextField(controller: cPnr, decoration: const InputDecoration(labelText: 'PNR')),
-          ],
-        ),
+        content: TextField(controller: cName, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Kaydet')),
@@ -3536,16 +3583,15 @@ class WatchlistTab extends StatelessWidget {
     if (ok != true) return;
 
     final name = cName.text.trim();
-    final pnr = cPnr.text.trim().toUpperCase();
     if (name.isEmpty) return;
 
     await ref.set({
       'fullName': name,
-      'pnr': pnr,
+      'pnr': FieldValue.delete(),
       'nameKeys': WatchlistTab._buildNameKeys(name),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-    await _log('WATCHLIST_EDIT', meta: {'from': current, 'to': name, 'pnr': pnr});
+    await _log('WATCHLIST_EDIT', meta: {'from': current, 'to': name});
   }
 
   Future<void> _delete(DocumentReference<Map<String, dynamic>> ref, String name) async {
@@ -3579,11 +3625,8 @@ class WatchlistTab extends StatelessWidget {
             itemBuilder: (_, i) {
               final d = docs[i];
               final name = (d.data()['fullName'] ?? '').toString();
-              final pnr = (d.data()['pnr'] ?? '').toString();
-
               return ListTile(
                 title: Text(name.isEmpty ? '—' : name),
-                subtitle: Text('PNR: ${pnr.isEmpty ? "—" : pnr}'),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
