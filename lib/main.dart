@@ -1857,10 +1857,17 @@ class _ScanTabState extends State<ScanTab> {
     final suffix = (m.group(4) ?? '').trim();
     final digitsNoLeading = digits.replaceFirst(RegExp(r'^0+'), '');
     final numPart = digitsNoLeading.isEmpty ? '0' : digitsNoLeading;
+
+    // If the "prefix" contains no letters (e.g. camera reads only "00185"),
+    // treat it as a digits-only flight number (caller can attach expected carrier).
+    final hasLetter = RegExp(r'[A-Z]').hasMatch(prefix);
+    if (!hasLetter) {
+      return '$numPart$suffix';
+    }
     return '$prefix$numPart$suffix';
   }
 
-  Set<String> _flightCodeAlternatives(String code) {
+Set<String> _flightCodeAlternatives(String code) {
     final n = _normalizeFlightCode(code);
     if (n.isEmpty) return <String>{};
 
@@ -1896,10 +1903,52 @@ class _ScanTabState extends State<ScanTab> {
 
 
   bool _flightCodeMatches(String expected, String scanned) {
-    final a = _flightCodeAlternatives(expected);
-    final b = _flightCodeAlternatives(scanned);
-    return a.intersection(b).isNotEmpty;
+    final expNorm = _normalizeFlightCode(expected);
+    final gotNorm = _normalizeFlightCode(scanned);
+
+    if (expNorm.isEmpty || gotNorm.isEmpty) return false;
+
+    // Fast path: same alternatives (IATA/ICAO normalization + leading zero stripping).
+    final a = _flightCodeAlternatives(expNorm);
+    final b = _flightCodeAlternatives(gotNorm);
+    if (a.intersection(b).isNotEmpty) return true;
+
+    // Heuristic: camera sometimes returns only digits (e.g. "00185") or misses trailing "0".
+    final expPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(expNorm) ?? '';
+    final expDigits = expNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
+    final gotPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(gotNorm) ?? '';
+    final gotDigits = gotNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
+
+    // If scanned has no carrier letters, compare digits only.
+    if (gotPrefix.isEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
+      if (gotDigits == expDigits) return true;
+      // Allow missing trailing zero (very common on some PDF417 reads).
+      if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
+      // Allow scanned with leading zeros.
+      final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
+      if (gotNoLead == expDigits) return true;
+      if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
+      // Allow partial prefix match: 185 vs 1850
+      if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
+    }
+
+    // If scanned has a carrier but digits are truncated, allow close match for same carrier family.
+    if (gotPrefix.isNotEmpty && expPrefix.isNotEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
+      // Carrier equivalence via alternatives
+      final expCarriers = a.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
+      final gotCarriers = b.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
+      final carrierOk = expCarriers.intersection(gotCarriers).isNotEmpty;
+      if (carrierOk) {
+        if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
+        final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
+        if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
+        if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
+      }
+    }
+
+    return false;
   }
+
 
   Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
     final rFixed = _sanitizeScanRawPreserve(raw);
@@ -1948,6 +1997,16 @@ class _ScanTabState extends State<ScanTab> {
           if (flightCode.isEmpty || (!fixedHits && regexHits)) {
             flightCode = regexFlight;
             if (flightCodeRaw.isEmpty) flightCodeRaw = regexFlight;
+          }
+        }
+
+        // Final normalization + attach expected carrier if camera returned digits only (e.g. "00185").
+        flightCode = _normalizeFlightCode(flightCode);
+        if (expectedFlightCode != null && expectedFlightCode.trim().isNotEmpty) {
+          final expNorm = _normalizeFlightCode(expectedFlightCode);
+          final expPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(expNorm) ?? '';
+          if (expPrefix.isNotEmpty && RegExp(r'^[0-9]+[A-Z]?$').hasMatch(flightCode)) {
+            flightCode = '$expPrefix$flightCode';
           }
         }
 
