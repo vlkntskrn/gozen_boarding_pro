@@ -963,6 +963,207 @@ bool _isFlightClosedVisible(Map<String, dynamic> data) {
   return DateTime.now().difference(refTime).inHours < 24;
 }
 
+
+Future<void> _editFlightDialog(
+  BuildContext context, {
+  required QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  required String uid,
+  required String role,
+}) async {
+  final data = doc.data();
+  final ownerUid = (data['ownerUid'] ?? '').toString();
+  final canManage = role == 'Admin' || role == 'Supervisor' || ownerUid == uid;
+  if (!canManage) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Bu uçuşu düzenleme yetkin yok.')));
+    return;
+  }
+
+  final codeCtrl = TextEditingController(text: (data['flightCode'] ?? '').toString());
+  final bookedCtrl = TextEditingController(text: (data['bookedPax'] ?? 0).toString());
+  DateTime? etd;
+  final etdTs = data['etdDate'];
+  if (etdTs is Timestamp) etd = etdTs.toDate();
+
+  bool _validFlightCode(String v) => RegExp(r'^[A-Z]{2,3}\d{1,4}$').hasMatch(v.toUpperCase());
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setSt) => AlertDialog(
+        title: const Text('Uçuşu Düzenle'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: codeCtrl,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(labelText: 'Uçuş Kodu'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: bookedCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Booked Pax'),
+              ),
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event),
+                title: Text(etd == null ? 'ETD Tarihi Seçilmedi' : 'ETD: ${DateFormat('yyyy-MM-dd').format(etd!)}'),
+                trailing: FilledButton.tonal(
+                  onPressed: () async {
+                    final now = DateTime.now();
+                    final picked = await showDatePicker(
+                      context: ctx,
+                      initialDate: etd ?? now,
+                      firstDate: DateTime(now.year - 1),
+                      lastDate: DateTime(now.year + 2),
+                      helpText: 'ETD Tarihi Seç',
+                    );
+                    if (picked != null) {
+                      setSt(() => etd = DateTime(picked.year, picked.month, picked.day));
+                    }
+                  },
+                  child: const Text('Tarih Seç'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Kaydet')),
+        ],
+      ),
+    ),
+  );
+
+  if (ok != true) return;
+
+  final code = codeCtrl.text.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  final booked = int.tryParse(bookedCtrl.text.trim()) ?? 0;
+  if (!_validFlightCode(code)) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Uçuş kodu hatalı. Örn: LS1850')));
+    return;
+  }
+  if (etd == null) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ETD tarihi seçin.')));
+    return;
+  }
+
+  final byEmail = (await Db.fs.collection('users').doc(uid).get()).data()?['email']?.toString() ?? '';
+  final before = {
+    'flightCode': (data['flightCode'] ?? '').toString(),
+    'bookedPax': (data['bookedPax'] ?? 0),
+    'etdDateText': (data['etdDateText'] ?? '').toString(),
+  };
+
+  await doc.reference.set({
+    'flightCode': code,
+    'bookedPax': booked,
+    'etdDate': Timestamp.fromDate(etd!),
+    'etdDateText': DateFormat('yyyy-MM-dd').format(etd!),
+    'updatedAt': FieldValue.serverTimestamp(),
+    'updatedByUid': uid,
+    'updatedByEmail': byEmail,
+  }, SetOptions(merge: true));
+
+  await doc.reference.collection('logs').add({
+    'type': 'FLIGHT_EDITED',
+    'byUid': uid,
+    'at': FieldValue.serverTimestamp(),
+    'meta': {
+      'byEmail': byEmail,
+      'before': before,
+      'after': {
+        'flightCode': code,
+        'bookedPax': booked,
+        'etdDateText': DateFormat('yyyy-MM-dd').format(etd!),
+      }
+    }
+  });
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Uçuş güncellendi.')));
+  }
+}
+
+Future<void> _deleteFlightWithArchive(
+  BuildContext context, {
+  required QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  required String uid,
+  required String role,
+}) async {
+  final data = doc.data();
+  final ownerUid = (data['ownerUid'] ?? '').toString();
+  final canManage = role == 'Admin' || role == 'Supervisor' || ownerUid == uid;
+  if (!canManage) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Bu uçuşu silme yetkin yok.')));
+    return;
+  }
+
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Uçuşu Sil'),
+      content: const Text('Bu uçuş aktif listeden tamamen silinecek. Loglar arşivlenir. Devam edilsin mi?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgeç')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sil')),
+      ],
+    ),
+  );
+  if (confirm != true) return;
+
+  final byUser = await Db.fs.collection('users').doc(uid).get();
+  final byEmail = (byUser.data()?['email'] ?? '').toString();
+
+  final logsSnap = await doc.reference.collection('logs').orderBy('at').get();
+  final logs = logsSnap.docs.map((d) => {
+    'id': d.id,
+    ...d.data(),
+  }).toList();
+
+  final archiveRef = Db.fs.collection('deleted_flight_archives').doc(doc.id);
+  await archiveRef.set({
+    'flightId': doc.id,
+    'flight': data,
+    'deletedAt': FieldValue.serverTimestamp(),
+    'deletedByUid': uid,
+    'deletedByEmail': byEmail,
+    'logs': logs,
+  }, SetOptions(merge: true));
+
+  await doc.reference.collection('logs').add({
+    'type': 'FLIGHT_DELETED',
+    'byUid': uid,
+    'at': FieldValue.serverTimestamp(),
+    'meta': {'byEmail': byEmail},
+  });
+
+  // refresh logs after deletion log append
+  final logsSnap2 = await doc.reference.collection('logs').orderBy('at').get();
+  await archiveRef.set({
+    'logs': logsSnap2.docs.map((d) => {'id': d.id, ...d.data()}).toList(),
+  }, SetOptions(merge: true));
+
+  for (final name in ['pax', 'watchlist', 'staff', 'equipment', 'logs', 'invites']) {
+    final sub = await doc.reference.collection(name).get();
+    for (final sd in sub.docs) {
+      await sd.reference.delete();
+    }
+  }
+  await doc.reference.delete();
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Uçuş silindi. Loglar arşive alındı (deleted_flight_archives).')),
+    );
+  }
+}
+
 Widget _flightTile({
   required BuildContext context,
   required QueryDocumentSnapshot<Map<String, dynamic>> doc,
@@ -988,26 +1189,54 @@ Widget _flightTile({
     }
   }
 
+  final ownerUid = (data['ownerUid'] ?? '').toString();
+  final canManage = role == 'Admin' || role == 'Supervisor' || ownerUid == uid;
+
   return ListTile(
     title: Text('$code  •  Booked: $booked'),
     subtitle: Text(atdLabel.isEmpty ? subtitle : '$subtitle\nATD: $atdLabel'),
     isThreeLine: atdLabel.isNotEmpty,
-    trailing: FilledButton(
-      onPressed: !allowOpen
-          ? null
-          : () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => FlightDetailScreen(
-                    flightId: doc.id,
-                    currentUid: uid,
-                    forceAllow: role == 'Supervisor' || role == 'Admin',
-                  ),
-                ),
-              );
+    trailing: Wrap(
+      spacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (canManage && !closed)
+          PopupMenuButton<String>(
+            tooltip: 'İşlemler',
+            onSelected: (v) async {
+              if (v == 'edit') {
+                await _editFlightDialog(context, doc: doc, uid: uid, role: role);
+              } else if (v == 'delete') {
+                await _deleteFlightWithArchive(context, doc: doc, uid: uid, role: role);
+              }
             },
-      child: Text(closed ? 'İncele' : 'Katıl'),
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'edit', child: Text('Düzenle')),
+              PopupMenuItem(value: 'delete', child: Text('Sil')),
+            ],
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 6),
+              child: Icon(Icons.more_vert),
+            ),
+          ),
+        FilledButton(
+          onPressed: !allowOpen
+              ? null
+              : () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => FlightDetailScreen(
+                        flightId: doc.id,
+                        currentUid: uid,
+                        forceAllow: role == 'Supervisor' || role == 'Admin',
+                      ),
+                    ),
+                  );
+                },
+          child: Text(closed ? 'İncele' : 'Katıl'),
+        ),
+      ],
     ),
   );
 }
@@ -1314,7 +1543,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
           'participants': <String>[],
           'createdAt': now,
           'offlineMode': false,
-          'nightMode': _nightMode,
+          'nightMode': false,
           'etdDate': Timestamp.fromDate(_etdDate!),
           'etdDateText': DateFormat('yyyy-MM-dd').format(_etdDate!),
           'opTimes': <String, dynamic>{},
@@ -1400,14 +1629,6 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
                       onPressed: _pickEtdDate,
                       child: const Text('Tarih Seç'),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    value: _nightMode,
-                    onChanged: (v) => setState(() => _nightMode = v),
-                    title: const Text('Gece Modu'),
-                    subtitle: const Text('Sadece uçuş oluştururken seçilir.'),
                   ),
                   const SizedBox(height: 4),
                   Row(
@@ -2707,6 +2928,34 @@ Set<String> _flightCodeAlternatives(String code) {
     final boardedStatus = (hitData['status'] ?? '').toString();
 
     if (sameName.isNotEmpty) {
+      if (!mounted) return true;
+      final infantDup = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Mükerrer Kart'),
+              content: Text(
+                'Bu yolcu zaten board edildi • Koltuk: $seatKey\n\nYolcu infant mı?',
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
+                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Infant')),
+              ],
+            ),
+          ) ??
+          false;
+
+      if (infantDup) {
+        await _log('PAX_DUPLICATE_INFANT_OVERRIDE_ALLOWED', meta: {
+          'reason': 'seat_same_name_infant',
+          'seat': seatKey,
+          'fullName': fullName,
+          'pnr': pnr,
+          'existingPaxId': hit.id,
+          'existingStatus': boardedStatus,
+        });
+        return false;
+      }
+
       await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
         'reason': 'seat_same_name',
         'seat': seatKey,
@@ -2716,7 +2965,6 @@ Set<String> _flightCodeAlternatives(String code) {
         'existingStatus': boardedStatus,
       });
       await _alertVibrate(3);
-      if (!mounted) return true;
       await _showResultScreen(
         bg: Colors.orange,
         title: 'MUKERRER KART',
