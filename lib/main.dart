@@ -29,6 +29,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
@@ -2015,6 +2017,9 @@ class _ScanTabState extends State<ScanTab> {
   bool _offline = false;
 
   final _manualScan = TextEditingController();
+  bool _ocrAssistEnabled = false;
+  final ImagePicker _imagePicker = ImagePicker();
+  final TextRecognizer _ocrTextRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
   bool _busy = false;
 
   // Camera scanner (MobileScanner)
@@ -2172,6 +2177,104 @@ Set<String> _flightCodeAlternatives(String code) {
   }
 
 
+
+  String? _sanitizeSeat(String? input) {
+    final v = (input ?? '').toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (v.isEmpty) return null;
+    final m = RegExp(r'^(\d{1,3})([A-Z]{1,2})$').firstMatch(v);
+    if (m == null) return null;
+    return '${m.group(1)}${m.group(2)}';
+  }
+
+  bool _looksLikeReasonableName(String? input) {
+    var v = (input ?? '').toUpperCase().trim();
+    if (v.isEmpty) return false;
+    v = v.replaceAll(RegExp(r'[^A-Z\s]'), ' ');
+    final toks = v.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    const stop = {'FLIGHT','DATE','FROM','TO','SEAT','GATE','CLOSES','DEPARTS','BOARDING','JET','JET2','COM','DLM','BRS'};
+    const titles = {'MR','MRS','MS','MISS','MSTR','DR'};
+    final clean = toks.where((t) => !stop.contains(t) && !titles.contains(t) && t.length >= 2).toList();
+    return clean.length >= 2 && clean.join('').length >= 5;
+  }
+
+  String? _extractDateTokenAny(String raw) {
+    final t = raw.toUpperCase();
+    final m1 = RegExp(r'DATE\s*[:\-]?\s*([0-3]?\d[\s/\-]+[A-Z]{3,9}[\s/\-]+\d{2,4})').firstMatch(t);
+    if (m1 != null) return m1.group(1)!.trim();
+    final m2 = RegExp(r'\b([0-3]?\d[\s/\-](?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[\s/\-]\d{2,4})\b').firstMatch(t);
+    if (m2 != null) return m2.group(1)!.trim();
+    final m3 = RegExp(r'\b([0-3]?\d[/-][01]?\d[/-]\d{2,4})\b').firstMatch(t);
+    if (m3 != null) return m3.group(1)!.trim();
+    final m4 = RegExp(r'\b([0-3]\d[A-Z]{3})\b').firstMatch(t);
+    if (m4 != null) return m4.group(1)!.trim();
+    return null;
+  }
+
+  bool _matchFlightDateFromToken(String flightDateIso, String? scannedDateToken) {
+    if (flightDateIso.trim().isEmpty || scannedDateToken == null || scannedDateToken.trim().isEmpty) return true;
+    final fd = DateTime.tryParse(flightDateIso);
+    if (fd == null) return true;
+    final t = scannedDateToken.trim().toUpperCase().replaceAll(RegExp(r'\s+'), ' ');
+    const mm = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'SEPT':9,'OCT':10,'NOV':11,'DEC':12};
+
+    final noYear = RegExp(r'^([0-3]\d)([A-Z]{3})$').firstMatch(t);
+    if (noYear != null) {
+      final d = int.tryParse(noYear.group(1)!);
+      final m = mm[noYear.group(2)!];
+      return d != null && m != null && fd.day == d && fd.month == m;
+    }
+
+    DateTime? sd;
+    final a = RegExp(r'^([0-3]?\d)[\s/\-]+([A-Z]{3,9})[\s/\-]+(\d{2,4})$').firstMatch(t);
+    if (a != null) {
+      final d = int.tryParse(a.group(1)!);
+      final m = mm[a.group(2)!.substring(0, 3)];
+      var y = int.tryParse(a.group(3)!);
+      if (y != null && y < 100) y += 2000;
+      if (d != null && m != null && y != null) sd = DateTime(y, m, d);
+    }
+    final b = RegExp(r'^([0-3]?\d)[/-]([01]?\d)[/-](\d{2,4})$').firstMatch(t);
+    if (sd == null && b != null) {
+      final d = int.tryParse(b.group(1)!);
+      final m = int.tryParse(b.group(2)!);
+      var y = int.tryParse(b.group(3)!);
+      if (y != null && y < 100) y += 2000;
+      if (d != null && m != null && y != null) sd = DateTime(y, m, d);
+    }
+    if (sd == null) return true;
+    return fd.year == sd.year && fd.month == sd.month && fd.day == sd.day;
+  }
+
+  Future<void> _showWrongDateDialog({required String expectedDate, required String scannedDate}) async {
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('UÇUŞ TARİHİ TUTMUYOR\nYOLCUYU BOARDLAMA!!', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 16),
+                  Text('Beklenen: $expectedDate', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 6),
+                  Text('Okunan: $scannedDate', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 16),
+                  FilledButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
     final rFixed = _sanitizeScanRawPreserve(raw);
     final r = rFixed.trim();
@@ -2182,8 +2285,9 @@ Set<String> _flightCodeAlternatives(String code) {
       return {
         'flightCode': parts.isNotEmpty ? parts[0] : '',
         'fullName': parts.length > 1 ? parts[1] : '',
-        'seat': parts.length > 2 ? parts[2] : '',
+        'seat': _sanitizeSeat(parts.length > 2 ? parts[2] : '') ?? '',
         'travelDate': parts.length > 3 ? parts[3] : '',
+        'dateToken': _extractDateTokenAny(parts.length > 3 ? parts[3] : '') ?? '',
         'pnr': parts.length > 4 ? parts[4] : '',
       };
     }
@@ -2239,9 +2343,10 @@ Set<String> _flightCodeAlternatives(String code) {
           return {
             'flightCode': flightCode,
             'fullName': name,
-            'seat': seat,
+            'seat': _sanitizeSeat(seat) ?? '',
             'pnr': pnr,
             'flightCodeRaw': flightCodeRaw,
+            'dateToken': _extractDateTokenAny(raw) ?? '',
           };
         }
       } catch (_) {}
@@ -2249,9 +2354,10 @@ Set<String> _flightCodeAlternatives(String code) {
 
     return {
       'flightCode': _extractFlightCodeLoose(r, expectedFlightCode: expectedFlightCode),
-      'fullName': _normalizeBcbpName(r),
-      'seat': _extractSeatLoose(r),
+      'fullName': _looksLikeReasonableName(_normalizeBcbpName(r)) ? _normalizeBcbpName(r) : '',
+      'seat': _sanitizeSeat(_extractSeatLoose(r)) ?? '',
       'pnr': '',
+      'dateToken': _extractDateTokenAny(r) ?? '',
     };
   }
 
@@ -2587,13 +2693,25 @@ Set<String> _flightCodeAlternatives(String code) {
     }
   }
 
-  Future<void> _showManualScanDialogAndProcess() async {
+  Future<void> _showManualScanDialogAndProcess({
+    String? prefillName,
+    String? prefillSeat,
+    String? prefillDate,
+    String? prefillFlight,
+    String? prefillPnr,
+  }) async {
     final flightSnap = await widget.flightRef.get();
     final expectedFlightCode = _normalizeFlightCode((flightSnap.data()?['flightCode'] ?? '').toString());
-    final nameCtrl = TextEditingController();
-    final seatCtrl = TextEditingController();
-    final dateCtrl = TextEditingController();
-    final flightCtrl = TextEditingController(text: expectedFlightCode);
+    final nameCtrl = TextEditingController(text: prefillName ?? '');
+    final seatCtrl = TextEditingController(text: prefillSeat ?? '');
+    final dateCtrl = TextEditingController(text: prefillDate ?? '');
+    final dayCtrl = TextEditingController();
+    final monthCtrl = TextEditingController();
+    final yearCtrl = TextEditingController();
+    final _pd = (prefillDate ?? '').split('-');
+    if (_pd.length == 3) { yearCtrl.text = _pd[0]; monthCtrl.text = _pd[1]; dayCtrl.text = _pd[2]; }
+    final flightCtrl = TextEditingController(text: (prefillFlight?.trim().isNotEmpty ?? false) ? prefillFlight : expectedFlightCode);
+    final pnrCtrl = TextEditingController(text: prefillPnr ?? '');
     final payload = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2606,9 +2724,17 @@ Set<String> _flightCodeAlternatives(String code) {
               const SizedBox(height: 8),
               TextField(controller: seatCtrl, decoration: const InputDecoration(labelText: 'Seat Number')),
               const SizedBox(height: 8),
-              TextField(controller: dateCtrl, decoration: const InputDecoration(labelText: 'Tarih')),
+              Row(children: [
+                Expanded(child: TextField(controller: dayCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Gün'))),
+                const SizedBox(width: 8),
+                Expanded(child: TextField(controller: monthCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Ay'))),
+                const SizedBox(width: 8),
+                Expanded(child: TextField(controller: yearCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Yıl'))),
+              ]),
               const SizedBox(height: 8),
               TextField(controller: flightCtrl, decoration: const InputDecoration(labelText: 'Uçuş Kodu')),
+              const SizedBox(height: 8),
+              TextField(controller: pnrCtrl, decoration: const InputDecoration(labelText: 'PNR (opsiyonel)')),
             ],
           ),
         ),
@@ -2618,10 +2744,18 @@ Set<String> _flightCodeAlternatives(String code) {
             onPressed: () {
               final fc = _normalizeFlightCode(flightCtrl.text.trim());
               final nm = nameCtrl.text.trim();
-              final st = seatCtrl.text.trim().toUpperCase();
-              final dt = dateCtrl.text.trim();
-              if (fc.isEmpty || nm.isEmpty || st.isEmpty) return;
-              Navigator.pop(ctx, '$fc|$nm|$st|$dt');
+              final st = _sanitizeSeat(seatCtrl.text) ?? '';
+              final dd = dayCtrl.text.trim();
+              final mm = monthCtrl.text.trim();
+              final yy = yearCtrl.text.trim();
+              final dt = (dd.isNotEmpty && mm.isNotEmpty && yy.isNotEmpty) ? '${yy.padLeft(4,'0')}-${mm.padLeft(2,'0')}-${dd.padLeft(2,'0')}' : dateCtrl.text.trim();
+              final pnr = pnrCtrl.text.trim().toUpperCase();
+              final y = int.tryParse(yy.isEmpty ? '0' : yy);
+              final m = int.tryParse(mm.isEmpty ? '0' : mm);
+              final d = int.tryParse(dd.isEmpty ? '0' : dd);
+              final validDate = (dd.isEmpty && mm.isEmpty && yy.isEmpty) || (y != null && y > 2000 && m != null && m >= 1 && m <= 12 && d != null && d >= 1 && d <= 31);
+              if (fc.isEmpty || !_looksLikeReasonableName(nm) || st.isEmpty || !validDate) return;
+              Navigator.pop(ctx, '$fc|$nm|$st|$dt|$pnr');
             },
             child: const Text('Scan İşle'),
           ),
@@ -2635,6 +2769,102 @@ Set<String> _flightCodeAlternatives(String code) {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+
+  String _ocrNorm(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9/ .:-]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  String _extractNameFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final lines = up.split(RegExp(r'[\r\n]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    for (final l in lines) {
+      if (l.contains('/') && RegExp(r'[A-Z]{2,}/[A-Z]{2,}').hasMatch(l)) {
+        return _normalizeBcbpName(l);
+      }
+    }
+    for (final l in lines) {
+      if (l.contains('NAME') || l.contains('PASSENGER')) continue;
+      final cleaned = l.replaceAll(RegExp(r'\b(MR|MRS|MS|MISS|MSTR|MASTER)\b'), '').trim();
+      if (RegExp(r'^[A-Z]{2,}(\s+[A-Z]{2,}){1,3}$').hasMatch(cleaned)) return cleaned;
+    }
+    return '';
+  }
+
+  String _extractFlightFromVisibleText(String text, String expectedFlight) {
+    final up = _ocrNorm(text);
+    final patterns = [
+      RegExp(r'\b(?:FLIGHT|FLT|UCUS|SEFER)\s*[:#-]?\s*([A-Z0-9]{1,3}\s*0*[0-9]{1,5}[A-Z]?)\b'),
+      RegExp(r'\b(JET2|TUI|SUNEXPRESS)\b.*?\b([A-Z0-9]{1,3}\s*0*[0-9]{1,5}[A-Z]?)\b'),
+    ];
+    for (final p in patterns) {
+      final m = p.firstMatch(up);
+      if (m != null) {
+        final g = (m.group(m.groupCount) ?? '').replaceAll(' ', '');
+        final n = _normalizeFlightCode(g);
+        if (n.isNotEmpty) return n;
+      }
+    }
+    return _extractFlightCodeLoose(up, expectedFlightCode: expectedFlight);
+  }
+
+  String _extractSeatFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m1 = RegExp(r'\b(?:SEAT|KOLTUK)\s*[:#-]?\s*(\d{1,2}[A-Z])\b').firstMatch(up);
+    if (m1 != null) return (m1.group(1) ?? '').toUpperCase();
+    return _extractSeatLoose(up);
+  }
+
+  String _extractDateFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m = RegExp(r'\b(\d{1,2}[./-][A-Z0-9]{2,3}[./-]\d{2,4}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b').firstMatch(up);
+    return m?.group(1) ?? '';
+  }
+
+  String _extractPnrFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m1 = RegExp(r'\b(?:PNR|BOOKING|RES)\s*[:#-]?\s*([A-Z0-9]{5,8})\b').firstMatch(up);
+    if (m1 != null) return (m1.group(1) ?? '').toUpperCase();
+    return '';
+  }
+
+  Future<void> _runOcrAssistScan() async {
+    final flightSnap = await widget.flightRef.get();
+    final expectedFlightCode = _normalizeFlightCode((flightSnap.data()?['flightCode'] ?? '').toString());
+    final picked = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 92, preferredCameraDevice: CameraDevice.rear);
+    if (picked == null) return;
+    setState(() => _busy = true);
+    try {
+      final input = InputImage.fromFilePath(picked.path);
+      final recognized = await _ocrTextRecognizer.processImage(input);
+      final allText = recognized.text;
+      if (allText.trim().isEmpty) {
+        throw Exception('OCR metin okuyamadı. Lütfen tekrar dene veya manuel form kullan.');
+      }
+      final prefillFlight = _extractFlightFromVisibleText(allText, expectedFlightCode);
+      final _prefillNameRaw = _extractNameFromVisibleText(allText);
+      final prefillName = _looksLikeReasonableName(_prefillNameRaw) ? _prefillNameRaw : '';
+      final prefillSeat = _sanitizeSeat(_extractSeatFromVisibleText(allText)) ?? '';
+      final prefillDate = _extractDateFromVisibleText(allText);
+      final prefillPnr = _extractPnrFromVisibleText(allText);
+      if (mounted) {
+        setState(() {
+          _lastParsedPreview = 'OCR: ${prefillFlight.isEmpty ? '-' : prefillFlight} • ${prefillName.isEmpty ? '-' : prefillName} • ${prefillSeat.isEmpty ? '-' : prefillSeat}';
+        });
+      }
+      await _showManualScanDialogAndProcess(
+        prefillName: prefillName,
+        prefillSeat: prefillSeat,
+        prefillDate: prefillDate,
+        prefillFlight: prefillFlight.isNotEmpty ? prefillFlight : expectedFlightCode,
+        prefillPnr: prefillPnr,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OCR hata: $e')));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -2752,8 +2982,9 @@ Set<String> _flightCodeAlternatives(String code) {
 
     final flightCode = (parsed['flightCode'] ?? '').toString().trim().toUpperCase();
     final flightCodeRaw = (parsed['flightCodeRaw'] ?? '').toString().trim().toUpperCase();
-    final fullName = (parsed['fullName'] ?? '').toString().trim();
-    final seat = (parsed['seat'] ?? '').toString().trim().toUpperCase();
+    final rawFullName = (parsed['fullName'] ?? '').toString().trim();
+    final fullName = _looksLikeReasonableName(rawFullName) ? rawFullName : '';
+    final seat = (_sanitizeSeat((parsed['seat'] ?? '').toString()) ?? '').trim().toUpperCase();
     final pnr = (parsed['pnr'] ?? '').toString().trim().toUpperCase();
 
     if (flightCode.isEmpty && flightCodeRaw.isEmpty) {
@@ -2773,6 +3004,21 @@ Set<String> _flightCodeAlternatives(String code) {
       await _alertVibrate(3);
       if (mounted) {
         await _showCriticalGateBlockScreen(expected: exp, got: got);
+      }
+      return;
+    }
+
+    final flightDateText = (fSnap.data()?['etdDateText'] ?? '').toString();
+    final scannedDateToken = ((parsed['dateToken'] ?? parsed['travelDate']) ?? '').toString().trim();
+    if (scannedDateToken.isNotEmpty && !_matchFlightDateFromToken(flightDateText, scannedDateToken)) {
+      await _log('PAX_WRONG_FLIGHT_DATE_BLOCKED', meta: {
+        'expectedDate': flightDateText,
+        'scannedDate': scannedDateToken,
+        'raw': _truncate(raw, 220),
+      });
+      await _alertVibrate(3);
+      if (mounted) {
+        await _showWrongDateDialog(expectedDate: flightDateText, scannedDate: scannedDateToken);
       }
       return;
     }
@@ -3023,7 +3269,7 @@ Set<String> _flightCodeAlternatives(String code) {
 
     final fullName = ((data['fullName'] ?? fallbackName) ?? '').toString();
     final seat = ((data['seat'] ?? fallbackSeat) ?? '').toString();
-    if (mounted && seat.trim().isNotEmpty) {
+    if (mounted) {
       final infant = await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
@@ -3372,6 +3618,7 @@ Set<String> _flightCodeAlternatives(String code) {
   @override
   void dispose() {
     _manualScan.dispose();
+    _ocrTextRecognizer.close();
     _scannerController.dispose();
     super.dispose();
   }
@@ -3533,6 +3780,24 @@ Set<String> _flightCodeAlternatives(String code) {
                                 title: const Text('Görsel Rehber Çerçevesi'),
                                 subtitle: const Text('OCR değil; barkod ve kart hizalama yardımı.'),
                               ),
+                              SwitchListTile(
+                                value: _ocrAssistEnabled,
+                                onChanged: isClosed ? null : (v) => setState(() => _ocrAssistEnabled = v),
+                                title: const Text('OCR Yardımı (Kamera metin okuma)'),
+                                subtitle: const Text('Opsiyonel. Kartın görünür metnini okuyup formu doldurur.'),
+                              ),
+                              if (_ocrAssistEnabled)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: SizedBox(
+                                    width: double.infinity,
+                                    child: OutlinedButton.icon(
+                                      onPressed: (_busy || isClosed) ? null : _runOcrAssistScan,
+                                      icon: const Icon(Icons.document_scanner),
+                                      label: const Text('OCR ile Kart Tara'),
+                                    ),
+                                  ),
+                                ),
                               TextField(
                                 controller: _manualScan,
                                 enabled: !isClosed,
