@@ -112,6 +112,11 @@ List<int> dailyForm(List<int> template,FlightSpec spec,Map<String,dynamic> data)
  final searched=pax.where((p)=>p['searched']==true).length;
  final fields=Map<String,dynamic>.from(data['fields']);
  final ba=spec.reportForm=='OPR-FRM-0012';
+ if(!ba) {
+  final times=Map<String,dynamic>.from(data['times']??{});
+  if((fields['L6']??'').toString().isEmpty) fields['L6']=times['boardingStarted']??'';
+  if((fields['L7']??'').toString().isEmpty) fields['L7']=times['lastPassenger']??'';
+ }
  for(final key in (ba?baFields:dailyFields).keys) {put(key,(fields[key]??'').toString());}
  put(ba?'E12':'G8',spec.code);put(ba?'L12':'P3',spec.date);
  put(ba?'O13':'L12',active.toString());put(ba?'O14':'L16',searched.toString());

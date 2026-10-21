@@ -64,7 +64,7 @@ class LocalFlight {
   Future<void> _tail = Future.value();
   LocalFlight(this.spec,this.actor,this.persist,{String? saved}) : _data = saved==null ? {
     'schema':1,'pax':<String,dynamic>{},'lp':<dynamic>[],'watchlist':<dynamic>[],
-    'logs':<dynamic>[],'fields':<String,dynamic>{},'closed':false,'mail':'NONE',
+    'logs':<dynamic>[],'fields':<String,dynamic>{},'times':<String,dynamic>{},'closed':false,'mail':'NONE',
   } : Map<String,dynamic>.from(jsonDecode(saved)) {
     if(!validAudit(_data)) throw const FormatException('Yerel işlem geçmişi doğrulanamadı.');
   }
@@ -130,6 +130,9 @@ class LocalFlight {
       pax[identity]={'name':p.fullName,'pnr':p.pnr,'seat':p.seat,'sequence':p.sequence,
         'status':random?'DFT_BOARDED':'PREBOARDED','searched':random,'lp':hits.length==1,'watch':watch,
         'adultId':adultId,'nationality':'','remarks':'','by':actor,'at':DateTime.now().toUtc().toIso8601String()};
+      final times=d.putIfAbsent('times',()=> <String,dynamic>{}) as Map;
+      times.putIfAbsent('boardingStarted',()=>DateTime.now().toIso8601String());
+      times['lastPassenger']=DateTime.now().toIso8601String();
     });
   }
   Future<void> offload(String id)=>change('PAX_OFFLOADED:$id',(d) {

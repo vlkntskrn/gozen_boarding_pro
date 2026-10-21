@@ -56,7 +56,12 @@ void main(){
   final l=LocalFlight(spec,'agent',(s)async{});await l.importLp(zipXml(lpXml()));await l.board(pass(),random:true);
   final word=searchForm(File('assets/forms/search.docx').readAsBytesSync(),spec,l.snapshot);
   final xml=utf8.decode(ZipDecoder().decodeBytes(word).findFile('word/document.xml')!.content as List<int>);
-  expect(xml,contains('SMITH/JOHN LP'));expect(xml,contains('Passenger'));expect(xml,contains('OPR-FRM-0098'));
+  expect(xml,contains('SMITH/JOHN LP'));expect(xml,contains('Passenger'));
+  final original=ZipDecoder().decodeBytes(File('assets/forms/search.docx').readAsBytesSync());
+  final generated=ZipDecoder().decodeBytes(word);
+  for(final entry in original.files.where((f)=>f.name.startsWith('word/footer') || f.name.startsWith('word/header'))) {
+   expect(generated.findFile(entry.name)!.content,entry.content);
+  }
   final report=dailyForm(File('assets/forms/daily.xlsx').readAsBytesSync(),spec,l.snapshot);
   final sheet=utf8.decode(ZipDecoder().decodeBytes(report).findFile('xl/worksheets/sheet1.xml')!.content as List<int>);
   expect(sheet,contains('LS196'));expect(sheet,contains('2026-10-20'));

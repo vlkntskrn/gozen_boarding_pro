@@ -12,6 +12,7 @@ import 'boarding_validation.dart';
 import 'local_flight.dart';
 import 'flight_forms.dart';
 import 'flight_local_storage.dart';
+import 'ocr_adapter.dart';
 
 class LocalOperationsScreen extends StatefulWidget {
  final String flightId;
@@ -102,6 +103,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
       FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Infant olarak bağla'))]));
     if(ok!=true) {await l.log('INFANT_LINK_CANCELLED');return;}adult=seated.first['id'];
    }
+   await authorize();
    await l.board(p,random:random,adultId:adult);
    final watch=(l.snapshot['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
    await result(watch?Colors.red:random?Colors.blue:Colors.green,
@@ -133,7 +135,19 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
    sequence:v['sequence']!,flightCode:v['code']!.toUpperCase(),travelDate:v['date'],origin:v['origin']!.toUpperCase(),destination:v['destination']!.toUpperCase());
   final problem=ledger!.spec.validate(p);
   if(problem!=null) {await ledger!.log('MANUAL_REJECTED');await result(Colors.purple,'WRONG FLIGHT',problem);return;}
-  await ledger!.board(p,random:random);await result(random?Colors.blue:Colors.green,random?'DFT RANDOM SUCCESSFUL':'PRE-BOARD SUCCESSFUL',p.fullName);
+  if(!p.fullName.contains('/') || p.fullName.split('/').any((s)=>s.trim().isEmpty)) {
+   throw const FormatException('Ad SOYAD/AD biçiminde doğrulanmalı.');
+  }
+  try {
+   await ledger!.log('MANUAL_VERIFICATION');
+   await ledger!.board(p,random:random);
+   final watch=(ledger!.snapshot['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
+   await result(watch?Colors.red:random?Colors.blue:Colors.green,
+    watch?'FLY PASSENGER ATTENTION!!!':random?'DFT RANDOM SUCCESSFUL':'PRE-BOARD SUCCESSFUL',p.fullName);
+  } on StateError catch(e) {
+   await ledger!.log('MANUAL_BLOCKED');
+   await result(e.message=='FLY PASSENGER ATTENTION!!!'?Colors.red:Colors.grey,e.message.toString(),'Kayıt eklenmedi.');
+  }
  }
  Future<void> importLp() async {
   final pick=await FilePicker.platform.pickFiles(type:FileType.custom,allowedExtensions:['docx'],withData:true);
@@ -141,6 +155,27 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
   final bytes=pick.files.single.bytes;
   if(bytes==null) throw StateError('Dosya okunamadı.');
   await ledger!.importLp(bytes);
+ }
+ Future<void> ocrAssist() async {
+  final ocr=OcrAdapter();
+  try {
+   final text=await ocr.captureText();
+   if(text==null || !mounted) return;
+   await ledger!.log('OCR_ASSIST_OPENED');
+   await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(title:const Text('OCR yardımcı okuma'),
+    content:SingleChildScrollView(child:Text('$text\n\nMetni kartla karşılaştırın. Sonraki ekranda uçuş, tarih ve iki havalimanını ayrı girin.')),
+    actions:[FilledButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Manuel doğrulamaya geç'))]));
+   await manual();
+  } finally {ocr.close();}
+ }
+ Future<void> csv() async {
+  await authorize(allowClosed:true);
+  String cell(dynamic v)=>'"${v.toString().replaceAll('"','""')}"';
+  final text=['NAME,PNR,SEAT,SEQUENCE,STATUS,LP',...ledger!.passengers.map((p)=>
+   [p['name'],p['pnr'],p['seat'],p['sequence'],p['status'],p['lp']==true?'LP':''].map(cell).join(','))].join('\r\n');
+  final name='${ledger!.spec.code}_LOCAL.csv';
+  await ledger!.log('CSV_EXPORTED');
+  await Share.shareXFiles([XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$text')),mimeType:'text/csv',name:name)],fileNameOverrides:[name]);
  }
  Future<Map<String,List<int>>> reports() async {
   final l=ledger!,base=l.spec.reportForm=='OPR-FRM-0012'?'ba':'daily';
@@ -226,11 +261,12 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
        if(busy) return;final text=capture.barcodes.firstOrNull?.rawValue;if(text!=null) run(()=>scan(text));
       })),
       Wrap(spacing:8,children:[TextButton(onPressed:()=>setState(()=>camera=!camera),child:Text(camera?'Kamerayı kapat':'Kamerayı aç')),
-       TextButton(onPressed:()=>scanner.toggleTorch(),child:const Text('Fener'))]),
+       TextButton(onPressed:camera?()=>run(()=>scanner.toggleTorch()):null,child:const Text('Fener'))]),
       TextField(controller:raw,maxLines:3,decoration:const InputDecoration(labelText:'BCBP metni (boşlukları koru)')),
       SwitchListTile(title:const Text('DFT Random'),value:random,onChanged:(v)=>setState(()=>random=v)),
       FilledButton(onPressed:busy||l.closed?null:()=>run(()=>scan(raw.text)),child:const Text('Kartı Doğrula')),
       TextButton(onPressed:busy||l.closed?null:()=>run(manual),child:const Text('Güvenli manuel giriş')),
+      if(!kIsWeb) TextButton(onPressed:busy||l.closed?null:()=>run(ocrAssist),child:const Text('OCR destekli manuel doğrulama')),
      ]),
      page([
       FilledButton(onPressed:busy||l.closed?null:()=>run(importLp),child:const Text('LP dosyası yükle (.docx)')),
@@ -262,6 +298,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
      ]),
      page([
       FilledButton(onPressed:busy?null:()=>run(export),child:const Text('Arama Formu + Daily Flight Report')),
+      TextButton(onPressed:busy?null:()=>run(csv),child:const Text('Yerel yolcu CSV raporu')),
       FilledButton(onPressed:busy||l.closed?null:()=>run(closeFlight),child:const Text('Uçuşu Kapat ve E-posta Gönder')),
       if(l.closed) ...[
        TextButton(onPressed:busy?null:()=>run(() async {await finalizeClosure();await sendMail();}),child:const Text('Kapanış / Gönderimi yeniden dene')),
