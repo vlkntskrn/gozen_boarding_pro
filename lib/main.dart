@@ -17,6 +17,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'boarding_validation.dart';
+import 'boarding_repository.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -328,9 +330,18 @@ class AuthGate extends StatelessWidget {
             themeMode: themeMode,
           );
         }
-        return HomeScreen(
-          onThemeChanged: onThemeChanged,
-          themeMode: themeMode,
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: Db.userDoc(snap.data!.uid).snapshots(),
+          builder: (context, profile) {
+            if (profile.connectionState == ConnectionState.waiting) return const _Splash();
+            if (profile.data?.data()?['active'] != true) {
+              return Scaffold(body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Hesabınız yönetici tarafından yetkilendirilmemiş.'),
+                TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Çıkış')),
+              ])));
+            }
+            return HomeScreen(onThemeChanged: onThemeChanged, themeMode: themeMode);
+          },
         );
       },
     );
@@ -415,8 +426,6 @@ class Db {
 }
 
 String _normalizeRoleValue(dynamic rawRole, {String? email}) {
-  final e = (email ?? '').trim().toLowerCase();
-  if (e == 'vlkntskrn@gmail.com') return 'Admin';
   final r = (rawRole ?? 'Agent').toString().trim().toLowerCase();
   if (r == 'admin') return 'Admin';
   if (r == 'supervisor') return 'Supervisor';
@@ -430,7 +439,6 @@ bool _isOwnerSupervisorOrAdmin({
   String? currentEmail,
 }) {
   if (currentUid == ownerUid) return true;
-  if ((currentEmail ?? '').trim().toLowerCase() == 'vlkntskrn@gmail.com') return true;
   return role == 'Supervisor' || role == 'Admin';
 }
 
@@ -458,7 +466,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _busy = false;
   String? _err;
 
-  Future<void> _loginOrRegister() async {
+  Future<void> _login() async {
     setState(() {
       _busy = true;
       _err = null;
@@ -472,42 +480,17 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception('Kullanıcı adı (email) ve şifre zorunlu.');
       }
 
-      UserCredential cred;
-      try {
-        cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
-          email: email,
-          password: pass,
-        );
-      } on FirebaseAuthException catch (e) {
-        // If user not found, auto-register (simple flow).
-        if (e.code == 'user-not-found') {
-          cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-            email: email,
-            password: pass,
-          );
-        } else {
-          rethrow;
-        }
+      final cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email, password: pass,
+      );
+      final profile = await Db.userDoc(cred.user!.uid).get(const GetOptions(source: Source.server));
+      if (!profile.exists || profile.data()?['active'] != true) {
+        await FirebaseAuth.instance.signOut();
+        throw Exception('Hesabınız yönetici tarafından yetkilendirilmemiş.');
       }
 
-      // Create user profile if missing.
-      final uid = cred.user!.uid;
-      final ref = Db.userDoc(uid);
-      final snap = await ref.get();
-      final usernameLower = email.split('@').first.trim().toLowerCase();
-      if (!snap.exists) {
-        await ref.set({
-          'email': email,
-          'usernameLower': usernameLower,
-          'role': 'Agent', // Agent or Supervisor
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      } else {
-        // Ensure email/username updated
-        await ref.set({'email': email, 'usernameLower': usernameLower}, SetOptions(merge: true));
-      }
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -563,7 +546,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            'Yetkili personel girişi • gerçek zamanlı boarding • offline queue sync',
+                            'Yetkili personel girişi • gerçek zamanlı boarding • doğrulanmış boarding',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -601,7 +584,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton(
-                        onPressed: _busy ? null : _loginOrRegister,
+                        onPressed: _busy ? null : _login,
                         child: _busy
                             ? const SizedBox(
                                 height: 18,
@@ -721,6 +704,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               children: [
                 const SizedBox(height: 6),
+                _PendingInvitesBar(uid: _uid),
                 Expanded(
                   child: _GlassPanel(
                     padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
@@ -745,20 +729,9 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  bool _busy = false;
-
   Future<Map<String, dynamic>> _load() async {
     final snap = await Db.userDoc(widget.uid).get();
     return snap.data() ?? {};
-  }
-
-  Future<void> _setRole(String role) async {
-    setState(() => _busy = true);
-    try {
-      await Db.userDoc(widget.uid).set({'role': role}, SetOptions(merge: true));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 
   @override
@@ -783,16 +756,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 const SizedBox(height: 12),
                 ListTile(
                   title: const Text('Uygulama Kullanıcı Rolü'),
-                  subtitle: const Text('Supervisor davetsiz her uçuşa girebilir.'),
-                  trailing: DropdownButton<String>(
-                    value: role,
-                    items: const [
-                      DropdownMenuItem(value: 'Agent', child: Text('Agent')),
-                      DropdownMenuItem(
-                          value: 'Supervisor', child: Text('Supervisor')),
-                    ],
-                    onChanged: _busy ? null : (v) => _setRole(v ?? 'Agent'),
-                  ),
+                  subtitle: Text('$role • Yetkili yönetici tarafından atanır.'),
                 ),
                 const SizedBox(height: 8),
                 const Text(
@@ -829,7 +793,7 @@ class _PendingInvitesBar extends StatelessWidget {
     final email = user?.email ?? '';
     if (user == null) return const SizedBox.shrink();
 
-    final q = Db.invites().where('status', isEqualTo: 'PENDING');
+    final q = Db.invites().where('inviteeUid', isEqualTo: uid).where('status', isEqualTo: 'PENDING');
 
     return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       future: Db.userDoc(uid).get(),
@@ -880,7 +844,7 @@ class InvitesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     final email = user?.email ?? '';
-    final q = Db.invites().where('status', isEqualTo: 'PENDING');
+    final q = Db.invites().where('inviteeUid', isEqualTo: uid).where('status', isEqualTo: 'PENDING');
 
     return Scaffold(
       appBar: AppBar(title: const Text('Davetler')),
@@ -986,7 +950,7 @@ Future<void> _editFlightDialog(
   final etdTs = data['etdDate'];
   if (etdTs is Timestamp) etd = etdTs.toDate();
 
-  bool _validFlightCode(String v) => RegExp(r'^[A-Z]{2,3}\d{1,4}$').hasMatch(v.toUpperCase());
+  bool _validFlightCode(String v) => normalizeFlightCode(v).isNotEmpty;
 
   final ok = await showDialog<bool>(
     context: context,
@@ -1044,7 +1008,7 @@ Future<void> _editFlightDialog(
 
   if (ok != true) return;
 
-  final code = codeCtrl.text.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  final code = normalizeFlightCode(codeCtrl.text);
   final booked = int.tryParse(bookedCtrl.text.trim()) ?? 0;
   if (!_validFlightCode(code)) {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Uçuş kodu hatalı. Örn: LS1850')));
@@ -1119,51 +1083,15 @@ Future<void> _deleteFlightWithArchive(
   );
   if (confirm != true) return;
 
-  final byUser = await Db.fs.collection('users').doc(uid).get();
-  final byEmail = (byUser.data()?['email'] ?? '').toString();
+  final batch = Db.fs.batch();
+  batch.update(doc.reference, {'deleted': true, 'closed': true,
+    'deletedAt': FieldValue.serverTimestamp(), 'deletedByUid': uid});
+  batch.set(doc.reference.collection('logs').doc(), {'type':'FLIGHT_DELETED',
+    'byUid':uid, 'at':FieldValue.serverTimestamp(), 'meta':{'retainedForAudit':true}});
+  await batch.commit();
+  if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Uçuş listeden kaldırıldı; denetim kayıtları korundu.')));
 
-  final logsSnap = await doc.reference.collection('logs').orderBy('at').get();
-  final logs = logsSnap.docs.map((d) => {
-    'id': d.id,
-    ...d.data(),
-  }).toList();
-
-  final archiveRef = Db.fs.collection('deleted_flight_archives').doc(doc.id);
-  await archiveRef.set({
-    'flightId': doc.id,
-    'flight': data,
-    'deletedAt': FieldValue.serverTimestamp(),
-    'deletedByUid': uid,
-    'deletedByEmail': byEmail,
-    'logs': logs,
-  }, SetOptions(merge: true));
-
-  await doc.reference.collection('logs').add({
-    'type': 'FLIGHT_DELETED',
-    'byUid': uid,
-    'at': FieldValue.serverTimestamp(),
-    'meta': {'byEmail': byEmail},
-  });
-
-  // refresh logs after deletion log append
-  final logsSnap2 = await doc.reference.collection('logs').orderBy('at').get();
-  await archiveRef.set({
-    'logs': logsSnap2.docs.map((d) => {'id': d.id, ...d.data()}).toList(),
-  }, SetOptions(merge: true));
-
-  for (final name in ['pax', 'watchlist', 'staff', 'equipment', 'logs', 'invites']) {
-    final sub = await doc.reference.collection(name).get();
-    for (final sd in sub.docs) {
-      await sd.reference.delete();
-    }
-  }
-  await doc.reference.delete();
-
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Uçuş silindi. Loglar arşive alındı (deleted_flight_archives).')),
-    );
-  }
 }
 
 Widget _flightTile({
@@ -1253,7 +1181,9 @@ class FlightsList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (role == 'Supervisor' || role == 'Admin') {
-      final q = Db.flights().orderBy('createdAt', descending: true).limit(100);
+      final q = role == 'Admin'
+        ? Db.flights().orderBy('createdAt', descending: true).limit(100)
+        : Db.flights().where('departureAirport', isEqualTo: 'DLM');
 
       return DefaultTabController(
         length: 2,
@@ -1269,7 +1199,7 @@ class FlightsList extends StatelessWidget {
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: q.snapshots(),
                 builder: (context, snap) {
-                  final all = snap.data?.docs ?? [];
+                  final all = (snap.data?.docs ?? []).where((d) => d.data()['deleted'] != true).toList();
                   final openDocs = all.where((d) => (d.data()['closed'] ?? false) != true).toList();
                   final closedDocs = all.where((d) => _isFlightClosedVisible(d.data())).toList();
 
@@ -1325,12 +1255,15 @@ class _MergedAgentFlights extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final q = Db.flights().orderBy('createdAt', descending: true).limit(100);
+    final q = Db.flights().where(Filter.or(
+      Filter('ownerUid', isEqualTo: uid),
+      Filter('participants', arrayContains: uid),
+    ));
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: q.snapshots(),
       builder: (context, snap) {
-        final all = snap.data?.docs ?? [];
+        final all = (snap.data?.docs ?? []).where((d) => d.data()['deleted'] != true).toList();
         final openDocs = all.where((d) => (d.data()['closed'] ?? false) != true).toList();
         final closedDocs = all.where((d) {
           final data = d.data();
@@ -1448,12 +1381,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     super.dispose();
   }
 
-  bool _isValidFlightCode(String v) {
-    // Examples: LS976, BA2245
-    // Examples: LS976, BA2245, TOM857, XQ0688
-    final re = RegExp(r'^[A-Z]{2,3}\d{1,4}$');
-    return re.hasMatch(v.toUpperCase());
-  }
+  bool _isValidFlightCode(String v) => normalizeFlightCode(v).isNotEmpty;
 
   Future<void> _addPaxDialog() async {
     final name = TextEditingController();
@@ -1524,7 +1452,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     });
 
     try {
-      final code = _flightCode.text.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+      final code = normalizeFlightCode(_flightCode.text);
       if (!_isValidFlightCode(code)) {
         throw Exception('Uçuş kodu formatı hatalı. Örn: LS976 / BA2245');
       }
@@ -1540,6 +1468,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
       await Db.fs.runTransaction((tx) async {
         tx.set(flightRef, {
           'flightCode': code,
+          'departureAirport': 'DLM',
           'bookedPax': booked,
           'ownerUid': widget.uid,
           'participants': <String>[],
@@ -1588,7 +1517,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
 
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1752,7 +1681,6 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
     final owner = (data['ownerUid'] ?? '').toString();
     final isClosed = (data['closed'] ?? false) == true;
 
-    if (widget.forceAllow) return _Access(allowed: true, reason: null);
     if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
 
     final me = await Db.userDoc(widget.currentUid).get();
@@ -1772,8 +1700,9 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
       return _Access(allowed: true, reason: null);
     }
 
-    // Open flights are visible to all signed-in users. Write permissions are restricted inside each tab.
-    return _Access(allowed: true, reason: null);
+    final participants = List<String>.from(data['participants'] ?? []);
+    return _Access(allowed: role == 'Admin' || role == 'Supervisor' || participants.contains(widget.currentUid),
+      reason: 'Bu uçuş için davet veya yönetici yetkisi gerekli.');
   }
 
   @override
@@ -1944,15 +1873,9 @@ class _FlightOpsHeaderState extends State<_FlightOpsHeader> {
                     style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
                   ),
                 ),
-                const Text('Offline', style: TextStyle(fontSize: 12)),
+                const Text('Çevrimiçi gerekli', style: TextStyle(fontSize: 12)),
                 const SizedBox(width: 6),
-                Switch(
-                  value: offline,
-                  onChanged: (v) async {
-                    await widget.flightRef.set({'offlineMode': v}, SetOptions(merge: true));
-                    await _logOffline(v);
-                  },
-                ),
+
               ],
             ),
           ),
@@ -2024,6 +1947,8 @@ class _ScanTabState extends State<ScanTab> {
 
   // Camera scanner (MobileScanner)
   bool _cameraOn = true;
+  bool _scanTabActive = true;
+  TabController? _tabs;
   String? _lastParsedPreview;
   DateTime? _lastCamHitAt;
   String? _lastCamRaw;
@@ -2035,6 +1960,8 @@ class _ScanTabState extends State<ScanTab> {
       BarcodeFormat.aztec,
       BarcodeFormat.qrCode,
       BarcodeFormat.dataMatrix,
+      BarcodeFormat.code128,
+      BarcodeFormat.code39,
     ],
   );
 
@@ -2043,147 +1970,26 @@ class _ScanTabState extends State<ScanTab> {
 
 
   
-  // --- Flight code normalization & matching (IATA/ICAO tolerant) ---
-  static const Map<String, String> _icaoToIata = {
-    // Jet2
-    'EXS': 'LS',
-    // British Airways
-    'BAW': 'BA',
-    // TUI group / partners
-    'TFL': 'OR', // TUI fly Netherlands
-    'TUI': 'X3', // TUIfly (Germany)
-    'TOM': 'BY', // TUI Airways (historical; many boarding passes show TOM)
-    // SunExpress
-    'SXS': 'XQ',
-    // Freebird Airlines
-    'FHY': 'FH',
-  };
-
-  static const Map<String, String> _iataToIcao = {
-    'LS': 'EXS',
-    'BA': 'BAW',
-    'OR': 'TFL',
-    'X3': 'TUI',
-    'BY': 'TOM',
-    'XQ': 'SXS',
-    'FH': 'FHY',
-    'TI': 'TWI', // Tailwind Airlines
-  };
-
-  String _normalizeFlightCode(String input) {
-    final s = input.trim().toUpperCase();
-    if (s.isEmpty) return '';
-    // Remove everything except letters/digits.
-    final cleaned = s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-    // Accept 1-3 alnum prefix + 1-5 digits + optional suffix letter.
-    final m = RegExp(r'^([A-Z0-9]{1,3})(0*)([0-9]{1,5})([A-Z]?)$').firstMatch(cleaned);
-    if (m == null) return cleaned;
-
-    final prefix = m.group(1)!;
-    final digits = m.group(3)!;
-    final suffix = (m.group(4) ?? '').trim();
-    final digitsNoLeading = digits.replaceFirst(RegExp(r'^0+'), '');
-    final numPart = digitsNoLeading.isEmpty ? '0' : digitsNoLeading;
-
-    // If the "prefix" contains no letters (e.g. camera reads only "00185"),
-    // treat it as a digits-only flight number (caller can attach expected carrier).
-    final hasLetter = RegExp(r'[A-Z]').hasMatch(prefix);
-    if (!hasLetter) {
-      return '$numPart$suffix';
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final tabs = DefaultTabController.of(context);
+    if (_tabs != tabs) {
+      _tabs?.removeListener(_tabChanged);
+      _tabs = tabs;
+      _tabs!.addListener(_tabChanged);
+      _scanTabActive = tabs.index == 0;
     }
-    return '$prefix$numPart$suffix';
+  }
+  void _tabChanged() {
+    final active = _tabs?.index == 0;
+    if (mounted && active != _scanTabActive) setState(() => _scanTabActive = active);
   }
 
-Set<String> _flightCodeAlternatives(String code) {
-    final n = _normalizeFlightCode(code);
-    if (n.isEmpty) return <String>{};
-
-    final m = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})([A-Z]?)$').firstMatch(n);
-    if (m == null) return <String>{n};
-
-    final pref = m.group(1)!;
-    final num = m.group(2)!;
-    final suf = (m.group(3) ?? '').trim();
-
-    final out = <String>{n};
-
-    // Many printed boarding passes show booking class right after the flight number (e.g. "LS 1850 Y").
-    // Treat trailing single letter as optional by adding a no-suffix variant.
-    if (suf.isNotEmpty) {
-      out.add('$pref$num');
-    }
-
-    // If given as ICAO (3), add IATA alt.
-    if (pref.length == 3 && _icaoToIata.containsKey(pref)) {
-      out.add('${_icaoToIata[pref]}$num$suf');
-      if (suf.isNotEmpty) out.add('${_icaoToIata[pref]}$num');
-    }
-
-    // If given as IATA, add ICAO alt.
-    if (_iataToIcao.containsKey(pref)) {
-      out.add('${_iataToIcao[pref]}$num$suf');
-      if (suf.isNotEmpty) out.add('${_iataToIcao[pref]}$num');
-    }
-
-    return out;
-  }
-
-
-  bool _flightCodeMatches(String expected, String scanned) {
-    final expNorm = _normalizeFlightCode(expected);
-    final gotNorm = _normalizeFlightCode(scanned);
-
-    if (expNorm.isEmpty || gotNorm.isEmpty) return false;
-
-    // Fast path: same alternatives (IATA/ICAO normalization + leading zero stripping).
-    final a = _flightCodeAlternatives(expNorm);
-    final b = _flightCodeAlternatives(gotNorm);
-    if (a.intersection(b).isNotEmpty) return true;
-
-    // Heuristic: camera sometimes returns only digits (e.g. "00185") or misses trailing "0".
-    final expPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(expNorm) ?? '';
-    final expDigits = expNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
-    final gotPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(gotNorm) ?? '';
-    final gotDigits = gotNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
-
-    // If scanned has no carrier letters, compare digits only.
-    if (gotPrefix.isEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
-      if (gotDigits == expDigits) return true;
-      // Allow missing trailing zero (very common on some PDF417 reads).
-      if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
-      // Allow scanned with leading zeros.
-      final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
-      if (gotNoLead == expDigits) return true;
-      if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
-      // Allow partial prefix match: 185 vs 1850
-      if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
-    }
-
-    // If scanned has a carrier but digits are truncated, allow close match for same carrier family.
-    if (gotPrefix.isNotEmpty && expPrefix.isNotEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
-      // Carrier equivalence via alternatives
-      final expCarriers = a.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
-      final gotCarriers = b.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
-      final carrierOk = expCarriers.intersection(gotCarriers).isNotEmpty;
-      if (carrierOk) {
-        if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
-        final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
-        if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
-        if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
-      }
-    }
-
-    return false;
-  }
-
-
-
+  String _normalizeFlightCode(String input) => normalizeFlightCode(input);
   String? _sanitizeSeat(String? input) {
-    final v = (input ?? '').toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
-    if (v.isEmpty) return null;
-    final m = RegExp(r'^(\d{1,3})([A-Z]{1,2})$').firstMatch(v);
-    if (m == null) return null;
-    return '${m.group(1)}${m.group(2)}';
+    final seat = normalizeSeat(input ?? '');
+    return seat.isEmpty ? null : seat;
   }
 
   bool _looksLikeReasonableName(String? input) {
@@ -2197,284 +2003,21 @@ Set<String> _flightCodeAlternatives(String code) {
     return clean.length >= 2 && clean.join('').length >= 5;
   }
 
-  String? _extractDateTokenAny(String raw) {
-    final t = raw.toUpperCase();
-    final m1 = RegExp(r'DATE\s*[:\-]?\s*([0-3]?\d[\s/\-]+[A-Z]{3,9}[\s/\-]+\d{2,4})').firstMatch(t);
-    if (m1 != null) return m1.group(1)!.trim();
-    final m2 = RegExp(r'\b([0-3]?\d[\s/\-](?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[\s/\-]\d{2,4})\b').firstMatch(t);
-    if (m2 != null) return m2.group(1)!.trim();
-    final m3 = RegExp(r'\b([0-3]?\d[/-][01]?\d[/-]\d{2,4})\b').firstMatch(t);
-    if (m3 != null) return m3.group(1)!.trim();
-    final m4 = RegExp(r'\b([0-3]\d[A-Z]{3})\b').firstMatch(t);
-    if (m4 != null) return m4.group(1)!.trim();
-    return null;
+  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode, String? expectedDate}) {
+    if (raw.contains('|')) {
+      final p = raw.split('|').map((v) => v.trim()).toList();
+      if (p.length != 6) throw const FormatException('Manuel format: UÇUŞ|AD SOYAD|KOLTUK|YYYY-AA-GG|PNR|KALKIŞ');
+      return BoardingPass(flightCode: normalizeFlightCode(p[0]), fullName: p[1],
+        seat: normalizeSeat(p[2]), travelDate: p[3], pnr: p[4].toUpperCase(),
+        origin: p[5].toUpperCase(), destination: '', sequence: '').toMap();
+    }
+    final legs = parseBcbp(raw);
+    if (legs.length == 1) return legs.single.toMap();
+    // Exact leg/date selection is performed with the current flight server data.
+    return selectBcbpLeg(legs, expectedFlightCode ?? '', expectedDate ?? '').toMap();
   }
 
-  bool _matchFlightDateFromToken(String flightDateIso, String? scannedDateToken) {
-    if (flightDateIso.trim().isEmpty || scannedDateToken == null || scannedDateToken.trim().isEmpty) return true;
-    final fd = DateTime.tryParse(flightDateIso);
-    if (fd == null) return true;
-    final t = scannedDateToken.trim().toUpperCase().replaceAll(RegExp(r'\s+'), ' ');
-    const mm = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'SEPT':9,'OCT':10,'NOV':11,'DEC':12};
-
-    final noYear = RegExp(r'^([0-3]\d)([A-Z]{3})$').firstMatch(t);
-    if (noYear != null) {
-      final d = int.tryParse(noYear.group(1)!);
-      final m = mm[noYear.group(2)!];
-      return d != null && m != null && fd.day == d && fd.month == m;
-    }
-
-    DateTime? sd;
-    final a = RegExp(r'^([0-3]?\d)[\s/\-]+([A-Z]{3,9})[\s/\-]+(\d{2,4})$').firstMatch(t);
-    if (a != null) {
-      final d = int.tryParse(a.group(1)!);
-      final m = mm[a.group(2)!.substring(0, 3)];
-      var y = int.tryParse(a.group(3)!);
-      if (y != null && y < 100) y += 2000;
-      if (d != null && m != null && y != null) sd = DateTime(y, m, d);
-    }
-    final b = RegExp(r'^([0-3]?\d)[/-]([01]?\d)[/-](\d{2,4})$').firstMatch(t);
-    if (sd == null && b != null) {
-      final d = int.tryParse(b.group(1)!);
-      final m = int.tryParse(b.group(2)!);
-      var y = int.tryParse(b.group(3)!);
-      if (y != null && y < 100) y += 2000;
-      if (d != null && m != null && y != null) sd = DateTime(y, m, d);
-    }
-    if (sd == null) return true;
-    return fd.year == sd.year && fd.month == sd.month && fd.day == sd.day;
-  }
-
-  Future<void> _showWrongDateDialog({required String expectedDate, required String scannedDate}) async {
-    if (!mounted) return;
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('UÇUŞ TARİHİ TUTMUYOR\nYOLCUYU BOARDLAMA!!', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 16),
-                  Text('Beklenen: $expectedDate', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 6),
-                  Text('Okunan: $scannedDate', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 16),
-                  FilledButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
-    final rFixed = _sanitizeScanRawPreserve(raw);
-    final r = rFixed.trim();
-    if (r.isEmpty) return {};
-
-    if (r.contains('|')) {
-      final parts = r.split('|').map((e) => e.trim()).toList();
-      return {
-        'flightCode': parts.isNotEmpty ? parts[0] : '',
-        'fullName': parts.length > 1 ? parts[1] : '',
-        'seat': _sanitizeSeat(parts.length > 2 ? parts[2] : '') ?? '',
-        'travelDate': parts.length > 3 ? parts[3] : '',
-        'dateToken': _extractDateTokenAny(parts.length > 3 ? parts[3] : '') ?? '',
-        'pnr': parts.length > 4 ? parts[4] : '',
-      };
-    }
-
-    final up = rFixed.toUpperCase();
-    if (up.length >= 40 && (up.startsWith('M') || up.startsWith('S'))) {
-      try {
-        final nameRaw = up.length >= 22 ? up.substring(2, 22).trim() : '';
-        final pnrRaw = up.length >= 30 ? up.substring(23, 30).trim() : '';
-        final name = _normalizeBcbpName(nameRaw);
-        final pnr = pnrRaw.replaceAll(RegExp(r'[^A-Z0-9]'), '');
-
-        String flightCode = '';
-        String flightCodeRaw = '';
-        String seat = '';
-
-        if (up.length >= 52) {
-          final carrier3 = up.substring(36, 39).trim().replaceAll(RegExp(r'[^A-Z0-9]'), '');
-          final flight5 = up.substring(39, 44).trim();
-          final seat4 = up.substring(48, 52).trim();
-          final flightNum = flight5.replaceAll(RegExp(r'[^0-9]'), '').replaceFirst(RegExp(r'^0+'), '');
-          seat = seat4.replaceAll(' ', '').replaceAll('-', '').replaceFirst(RegExp(r'^0+'), '');
-          if (carrier3.isNotEmpty && flightNum.isNotEmpty) {
-            final carrier2 = _icaoToIata[carrier3] ?? carrier3;
-            flightCode = '$carrier2$flightNum';
-            flightCodeRaw = '$carrier3$flightNum';
-          }
-        }
-
-        final regexFlight = _extractFlightCodeLoose(_sanitizeScanRaw(raw), expectedFlightCode: expectedFlightCode);
-        if (regexFlight.isNotEmpty) {
-          final fixedHits = flightCode.isNotEmpty && (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, flightCode);
-          final regexHits = (expectedFlightCode ?? '').isNotEmpty && _flightCodeMatches(expectedFlightCode!, regexFlight);
-          if (flightCode.isEmpty || (!fixedHits && regexHits)) {
-            flightCode = regexFlight;
-            if (flightCodeRaw.isEmpty) flightCodeRaw = regexFlight;
-          }
-        }
-
-        // Final normalization + attach expected carrier if camera returned digits only (e.g. "00185").
-        flightCode = _normalizeFlightCode(flightCode);
-        if (expectedFlightCode != null && expectedFlightCode.trim().isNotEmpty) {
-          final expNorm = _normalizeFlightCode(expectedFlightCode);
-          final expPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(expNorm) ?? '';
-          if (expPrefix.isNotEmpty && RegExp(r'^[0-9]+[A-Z]?$').hasMatch(flightCode)) {
-            flightCode = '$expPrefix$flightCode';
-          }
-        }
-
-        if (seat.isEmpty) seat = _extractSeatLoose(up);
-
-        if (flightCode.isNotEmpty || name.isNotEmpty || seat.isNotEmpty || pnr.isNotEmpty) {
-          return {
-            'flightCode': flightCode,
-            'fullName': name,
-            'seat': _sanitizeSeat(seat) ?? '',
-            'pnr': pnr,
-            'flightCodeRaw': flightCodeRaw,
-            'dateToken': _extractDateTokenAny(raw) ?? '',
-          };
-        }
-      } catch (_) {}
-    }
-
-    return {
-      'flightCode': _extractFlightCodeLoose(r, expectedFlightCode: expectedFlightCode),
-      'fullName': _looksLikeReasonableName(_normalizeBcbpName(r)) ? _normalizeBcbpName(r) : '',
-      'seat': _sanitizeSeat(_extractSeatLoose(r)) ?? '',
-      'pnr': '',
-      'dateToken': _extractDateTokenAny(r) ?? '',
-    };
-  }
-
-  String _sanitizeScanRawPreserve(String raw) {
-    final sb = StringBuffer();
-    for (final c in raw.runes) {
-      if (c == 9 || c == 10 || c == 13) {
-        sb.write(' ');
-      } else if (c >= 32 && c <= 126) {
-        sb.writeCharCode(c);
-      } else {
-        sb.write(' ');
-      }
-    }
-    return sb.toString();
-  }
-
-  String _sanitizeScanRaw(String raw) {
-    return _sanitizeScanRawPreserve(raw).replaceAll(RegExp(r'\s+'), ' ');
-  }
-
-  String _normalizeBcbpName(String rawName) {
-    var up = rawName.toUpperCase().trim();
-    if (up.isEmpty) return '';
-    final m = RegExp(r'([A-Z]+)\/([A-Z]+)').firstMatch(up);
-    if (m != null) {
-      final last = m.group(1) ?? '';
-      var first = m.group(2) ?? '';
-      first = first.replaceAll(RegExp(r'(MR|MRS|MS|MISS|MSTR|MASTER|CHD|INF|INFT|MI)$'), '');
-      return ('$last $first').trim();
-    }
-    up = up.replaceAll('/', ' ').replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
-    return up.replaceAll(RegExp(r'\s+'), ' ').trim();
-  }
-
-  String _extractFlightCodeLoose(String raw, {String? expectedFlightCode}) {
-    final up = raw.toUpperCase();
-    final expected = (expectedFlightCode ?? '').trim();
-
-    // BCBP-friendly extraction: FROM(3) + TO(3) + CARRIER(2/3) + FLIGHT(1-4)
-    // Examples: DLMMANLS 1730, BRSDLMTOM0836, DLMEDIXQ 0688
-    final bcbpLeg = RegExp(r'\b([A-Z]{3})([A-Z]{3})([A-Z0-9]{2,3})\s*0*([0-9]{1,4})\b');
-    for (final m in bcbpLeg.allMatches(up)) {
-      final carrier = (m.group(3) ?? '').trim();
-      final num = (m.group(4) ?? '').trim();
-      final n = _normalizeFlightCode('$carrier$num');
-      if (n.isEmpty) continue;
-      if (expected.isNotEmpty && _flightCodeMatches(expected, n)) return n;
-    }
-
-    final re1 = RegExp(r'\b([A-Z0-9]{1,3})\s*0*([0-9]{1,5})(?:\s*[A-Z])?\b');
-    final matches = re1.allMatches(up).toList();
-
-    String best = '';
-    int bestScore = -999;
-
-    for (final m in matches) {
-      final code = (m.group(1) ?? '').trim();
-      final num = (m.group(2) ?? '').trim();
-      if (code.isEmpty || num.isEmpty) continue;
-      final n = _normalizeFlightCode('$code$num');
-      if (n.isEmpty) continue;
-
-      int score = 0;
-      if (_iataToIcao.containsKey(code) || _icaoToIata.containsKey(code)) score += 5;
-      if (num.length >= 2 && num.length <= 4) score += 2;
-      if (expected.isNotEmpty && _flightCodeMatches(expected, n)) score += 100;
-      if (score > bestScore) {
-        bestScore = score;
-        best = n;
-      }
-    }
-
-    // Expected-flight recovery heuristic (helps noisy PDF417 reads like LS00185 vs LS1850)
-    if (best.isNotEmpty && expected.isNotEmpty && !_flightCodeMatches(expected, best)) {
-      final exp = _normalizeFlightCode(expected);
-      final reCode = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})$');
-      final me = reCode.firstMatch(exp);
-      final mb = reCode.firstMatch(best);
-      if (me != null && mb != null) {
-        final expCarrier = me.group(1) ?? '';
-        final expNum = me.group(2) ?? '';
-        final gotCarrier = mb.group(1) ?? '';
-        final gotNumRaw = mb.group(2) ?? '';
-        final gotNum = gotNumRaw.replaceFirst(RegExp(r'^0+'), '');
-        if (expCarrier == gotCarrier || _flightCodeMatches(expCarrier, gotCarrier)) {
-          final expNumNo0 = expNum.replaceFirst(RegExp(r'^0+'), '');
-          final prefixClose =
-              (expNum.startsWith(gotNum) || expNumNo0.startsWith(gotNum)) &&
-              (expNum.length - gotNum.length).abs() <= 1 &&
-              gotNum.length >= 3;
-          final suffixClose =
-              (gotNum.endsWith(expNum) || gotNum.endsWith(expNumNo0)) &&
-              (gotNum.length - expNum.length).abs() <= 1 &&
-              expNum.length >= 3;
-          final distClose = _levenshtein(expNum, gotNum.padLeft(expNum.length, '0')) <= 1 ||
-              _levenshtein(expNum, gotNum) <= 1;
-          if (prefixClose || suffixClose || distClose) {
-            return exp;
-          }
-        }
-      }
-    }
-
-    if (best.isNotEmpty) return best;
-
-    final cleaned = up.replaceAll(RegExp(r'[^A-Z0-9]'), ' ');
-    final tokens = cleaned.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
-    for (final t in tokens) {
-      final n = _normalizeFlightCode(t);
-      if (RegExp(r'^[A-Z0-9]{1,3}[0-9]{1,5}[A-Z]?$').hasMatch(n)) {
-        if (expected.isEmpty || _flightCodeMatches(expected, n)) return n;
-        if (best.isEmpty) best = n;
-      }
-    }
-    return best;
-  }
+  String _normalizeBcbpName(String name) => name.replaceAll('/', ' ').trim();
 
   String _extractSeatLoose(String text) {
     final up = text.toUpperCase();
@@ -2568,71 +2111,10 @@ Set<String> _flightCodeAlternatives(String code) {
   }
 
   Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
-    final scannedKeys = _nameKeyVariants(fullName);
-    if (scannedKeys.isEmpty) return false;
-
-    bool _fuzzyTokenEq(String a, String b) {
-      final aa = a.trim().toUpperCase();
-      final bb = b.trim().toUpperCase();
-      if (aa.isEmpty || bb.isEmpty) return false;
-      if (aa == bb) return true;
-      final maxLen = aa.length > bb.length ? aa.length : bb.length;
-      if (maxLen <= 3) return false;
-      final dist = _levenshtein(aa, bb);
-      return maxLen >= 8 ? dist <= 2 : dist <= 1;
-    }
-
-    List<String> _tokensFromName(String s) {
-      var up = s.toUpperCase();
-      const titles = ['MR','MRS','MS','MISS','MSTR','MASTER','DR','PROF','SIR','MADAM','INF','INFT','INFANT','CHD','CHILD'];
-      up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
-      up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
-      up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
-      final toks = up.isEmpty ? <String>[] : up.split(' ').where((t) => t.isNotEmpty).toList();
-      while (toks.isNotEmpty && titles.contains(toks.first)) toks.removeAt(0);
-      while (toks.isNotEmpty && titles.contains(toks.last)) toks.removeLast();
-      return toks;
-    }
-
-    bool _strongNameMatch(String wlName) {
-      final wlKeys = _nameKeyVariants(wlName);
-      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
-
-      final st = _tokensFromName(fullName);
-      final wt = _tokensFromName(wlName);
-      if (st.isEmpty || wt.isEmpty) return false;
-
-      final usedW = <int>{};
-      var matched = 0;
-      for (final sTok in st) {
-        for (var i = 0; i < wt.length; i++) {
-          if (usedW.contains(i)) continue;
-          if (_fuzzyTokenEq(sTok, wt[i])) {
-            usedW.add(i);
-            matched++;
-            break;
-          }
-        }
-      }
-
-      if (st.length >= 2 && wt.length >= 2) return matched >= 2;
-
-      final sJoined = st.join('');
-      final wJoined = wt.join('');
-      final maxLen = sJoined.length > wJoined.length ? sJoined.length : wJoined.length;
-      if (maxLen < 6) return false;
-      final ratio = (maxLen - _levenshtein(sJoined, wJoined)) / maxLen;
-      return ratio >= 0.82;
-    }
-
-    final snap = await widget.flightRef.collection('watchlist').limit(500).get();
-    for (final d in snap.docs) {
-      final data = d.data();
-      final wlName = (data['fullName'] ?? '').toString();
-      if (wlName.trim().isEmpty) continue;
-      if (_strongNameMatch(wlName)) return true;
-    }
-    return false;
+    final snap = await widget.flightRef.collection('watchlist').get(const GetOptions(source: Source.server));
+    return snap.docs.any((d) => watchlistMatches(fullName,
+      (d.data()['fullName'] ?? '').toString(), pnr: pnr,
+      watchPnr: (d.data()['pnr'] ?? '').toString()));
   }
 
   Set<String> _nameKeyVariants(String s) {
@@ -2710,8 +2192,10 @@ Set<String> _flightCodeAlternatives(String code) {
     final yearCtrl = TextEditingController();
     final _pd = (prefillDate ?? '').split('-');
     if (_pd.length == 3) { yearCtrl.text = _pd[0]; monthCtrl.text = _pd[1]; dayCtrl.text = _pd[2]; }
-    final flightCtrl = TextEditingController(text: (prefillFlight?.trim().isNotEmpty ?? false) ? prefillFlight : expectedFlightCode);
+    final flightCtrl = TextEditingController(text: prefillFlight ?? '');
+    final originCtrl = TextEditingController();
     final pnrCtrl = TextEditingController(text: prefillPnr ?? '');
+    setState(() => _busy = true);
     final payload = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2732,7 +2216,8 @@ Set<String> _flightCodeAlternatives(String code) {
                 Expanded(child: TextField(controller: yearCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Yıl'))),
               ]),
               const SizedBox(height: 8),
-              TextField(controller: flightCtrl, decoration: const InputDecoration(labelText: 'Uçuş Kodu')),
+              TextField(controller: flightCtrl, decoration: const InputDecoration(labelText: 'Karttaki Uçuş Kodu')),
+              TextField(controller: originCtrl, decoration: const InputDecoration(labelText: 'Karttaki Kalkış (IATA)')),
               const SizedBox(height: 8),
               TextField(controller: pnrCtrl, decoration: const InputDecoration(labelText: 'PNR (opsiyonel)')),
             ],
@@ -2753,16 +2238,19 @@ Set<String> _flightCodeAlternatives(String code) {
               final y = int.tryParse(yy.isEmpty ? '0' : yy);
               final m = int.tryParse(mm.isEmpty ? '0' : mm);
               final d = int.tryParse(dd.isEmpty ? '0' : dd);
-              final validDate = (dd.isEmpty && mm.isEmpty && yy.isEmpty) || (y != null && y > 2000 && m != null && m >= 1 && m <= 12 && d != null && d >= 1 && d <= 31);
-              if (fc.isEmpty || !_looksLikeReasonableName(nm) || st.isEmpty || !validDate) return;
-              Navigator.pop(ctx, '$fc|$nm|$st|$dt|$pnr');
+              final validDate = strictDate(dt) != null;
+              if (fc.isEmpty || !_looksLikeReasonableName(nm) || st.isEmpty || !validDate || originCtrl.text.trim().isEmpty) return;
+              Navigator.pop(ctx, '$fc|$nm|$st|$dt|$pnr|${originCtrl.text.trim().toUpperCase()}');
             },
             child: const Text('Scan İşle'),
           ),
         ],
       ),
     );
-    if (payload == null || payload.trim().isEmpty) return;
+    if (payload == null || payload.trim().isEmpty) {
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
     setState(() => _busy = true);
     try {
       await _processScanString(payload, manualEntry: true);
@@ -2808,7 +2296,7 @@ Set<String> _flightCodeAlternatives(String code) {
         if (n.isNotEmpty) return n;
       }
     }
-    return _extractFlightCodeLoose(up, expectedFlightCode: expectedFlight);
+    return ''; // Never infer a missing flight from the expected flight.
   }
 
   String _extractSeatFromVisibleText(String text) {
@@ -2859,7 +2347,7 @@ Set<String> _flightCodeAlternatives(String code) {
         prefillName: prefillName,
         prefillSeat: prefillSeat,
         prefillDate: prefillDate,
-        prefillFlight: prefillFlight.isNotEmpty ? prefillFlight : expectedFlightCode,
+        prefillFlight: prefillFlight,
         prefillPnr: prefillPnr,
       );
     } catch (e) {
@@ -2918,231 +2406,89 @@ Set<String> _flightCodeAlternatives(String code) {
     );
   }
 
-  Future<void> _showResultScreen({
-    required Color bg,
-    required String title,
-    String? subtitle,
-  }) async {
+  Future<void> _showResultScreen({required Color bg, required String title, String? subtitle}) async {
+    if (!mounted) return;
     final fg = bg.computeLuminance() < 0.35 ? Colors.white : Colors.black;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (_) => Dialog(
-        child: Container(
-          width: 360,
-          padding: const EdgeInsets.all(16),
-          color: bg,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              if (subtitle != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  subtitle,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: fg,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              )
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (ctx) => Dialog.fullscreen(child: ColoredBox(color: bg,
+        child: SafeArea(child: Center(child: Padding(padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(title, textAlign: TextAlign.center,
+              style: TextStyle(color: fg, fontSize: 30, fontWeight: FontWeight.w900)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 20),
+              Text(subtitle, textAlign: TextAlign.center, style: TextStyle(color: fg, fontSize: 20)),
             ],
-          ),
-        ),
-      ),
+            const SizedBox(height: 24),
+            FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          ]),
+        ))),
+      )),
     );
   }
 
-  // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw, {bool manualEntry = false}) async {
-    final fSnap0 = await widget.flightRef.get();
-    if ((fSnap0.data()?['closed'] ?? false) == true) {
-      throw Exception('Uçuş kapatılmış. Scan devre dışı.');
-    }
-    final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
-    final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
-    if (parsed.isEmpty) {
-      throw Exception('Scan verisi boş / anlaşılamadı.');
-    }
-
-    final flightCode = (parsed['flightCode'] ?? '').toString().trim().toUpperCase();
-    final flightCodeRaw = (parsed['flightCodeRaw'] ?? '').toString().trim().toUpperCase();
-    final rawFullName = (parsed['fullName'] ?? '').toString().trim();
-    final fullName = _looksLikeReasonableName(rawFullName) ? rawFullName : '';
-    final seat = (_sanitizeSeat((parsed['seat'] ?? '').toString()) ?? '').trim().toUpperCase();
-    final pnr = (parsed['pnr'] ?? '').toString().trim().toUpperCase();
-
-    if (flightCode.isEmpty && flightCodeRaw.isEmpty) {
-      throw Exception('Uçuş kodu okunamadı.');
-    }
-
-    final fSnap = await widget.flightRef.get();
-    final fCode = (fSnap.data()?['flightCode'] ?? '').toString();
-
-    final ok = _flightCodeMatches(fCode, flightCode) ||
-        (flightCodeRaw.isNotEmpty && _flightCodeMatches(fCode, flightCodeRaw));
-
-    if (!ok) {
-      final exp = _normalizeFlightCode(fCode);
-      final got = _normalizeFlightCode(flightCode.isNotEmpty ? flightCode : flightCodeRaw);
-      await _log('PAX_WRONG_FLIGHT_SCAN_BLOCKED', meta: {'expected': exp, 'got': got, 'raw': _truncate(raw, 220)});
-      await _alertVibrate(3);
-      if (mounted) {
-        await _showCriticalGateBlockScreen(expected: exp, got: got);
-      }
-      return;
-    }
-
-    final flightDateText = (fSnap.data()?['etdDateText'] ?? '').toString();
-    final scannedDateToken = ((parsed['dateToken'] ?? parsed['travelDate']) ?? '').toString().trim();
-    if (scannedDateToken.isNotEmpty && !_matchFlightDateFromToken(flightDateText, scannedDateToken)) {
-      await _log('PAX_WRONG_FLIGHT_DATE_BLOCKED', meta: {
-        'expectedDate': flightDateText,
-        'scannedDate': scannedDateToken,
-        'raw': _truncate(raw, 220),
-      });
-      await _alertVibrate(3);
-      if (mounted) {
-        await _showWrongDateDialog(expectedDate: flightDateText, scannedDate: scannedDateToken);
-      }
-      return;
-    }
-
-// Offer Pre-BOARD vs DFT Random
-    final isWl = await _isWatchlistMatch(fullName, pnr: pnr);
-
-    final choice = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Boarding Seçimi'),
-        content: Text(isWl
-            ? 'WatchList MATCH: Sadece RANDOM SELECTION seçilebilir.'
-            : 'İki seçenek: Pre-BOARD veya DFT Random'),
-        actions: [
-          TextButton(
-            onPressed: isWl ? null : () => Navigator.pop(context, 'PRE'),
-            child: const Text('Pre-BOARD'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, 'RANDOM'),
-            child: const Text('DFT Random'),
-          ),
-        ],
-      ),
-    );
-
-    if (choice == null) return;
-
-    // Seat-level duplicate / infant flow
-    if (await _handleSeatDuplicateOrInfant(fullName: fullName, seat: seat, pnr: pnr)) {
-      return;
-    }
-
-    // Find existing pax by (fullName + seat) or create if missing.
-    final paxCol = widget.flightRef.collection('pax');
-    final q = await paxCol
-        .where('fullName', isEqualTo: fullName)
-        .where('seat', isEqualTo: seat)
-        .limit(1)
-        .get();
-
-    DocumentReference<Map<String, dynamic>> paxRef;
-    if (q.docs.isNotEmpty) {
-      paxRef = q.docs.first.reference;
+    final f = (await widget.flightRef.get(const GetOptions(source: Source.server))).data();
+    if (f == null || f['closed'] == true) throw Exception('Uçuş kapalı/bulunamadı.');
+    final expected = (f['flightCode'] ?? '').toString();
+    final date = (f['etdDateText'] ?? '').toString();
+    BoardingPass pass;
+    if (manualEntry && raw.contains('|')) {
+      final p = _parseScanPayload(raw);
+      pass = BoardingPass(fullName: p['fullName']!, pnr: p['pnr']!, origin: p['origin']!,
+        destination: '', flightCode: p['flightCode']!, seat: p['seat']!,
+        sequence: '', travelDate: p['travelDate']);
     } else {
-      paxRef = paxCol.doc();
-      await paxRef.set({
-        'fullName': fullName,
-        'seat': seat,
-        'pnr': pnr,
-        'status': 'NONE',
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-    }
-
-    if (await _showDuplicateIfNeeded(paxRef, fallbackName: fullName, fallbackSeat: seat)) {
-      return;
-    }
-
-    final byEmail = await _emailOf(widget.currentUid);
-    final now = FieldValue.serverTimestamp();
-
-    if (choice == 'PRE') {
-      await paxRef.set({
-        'status': 'PREBOARDED',
-        'boardedAt': now,
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        if (manualEntry) 'manualBoarded': true,
-        if (manualEntry) 'manualBoardedByEmail': byEmail,
-      }, SetOptions(merge: true));
-
-      await _autoMarkOpTimesForBoarding();
-      await _log(
-        manualEntry ? 'PAX_PREBOARDED_MANUAL_SCAN' : 'PAX_PREBOARDED',
-        meta: {
-          'fullName': fullName,
-          'seat': seat,
-          if (manualEntry) 'manuallyBoardedBy': byEmail,
-        },
-      );
-
-      await _showResultScreen(
-        bg: Colors.green,
-        title: 'PRE-BOARD SUCCESSFULL',
-      );
-    } else {
-      await paxRef.set({
-        'status': 'DFT_BOARDED',
-        'boardedAt': now,
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        if (manualEntry) 'manualBoarded': true,
-        if (manualEntry) 'manualBoardedByEmail': byEmail,
-      }, SetOptions(merge: true));
-
-      await _autoMarkOpTimesForBoarding();
-      await _log(
-        manualEntry ? 'PAX_RANDOM_SELECTED_MANUAL_SCAN' : 'PAX_RANDOM_SELECTED',
-        meta: {
-          'fullName': fullName,
-          'seat': seat,
-          'watchlistMatch': isWl,
-          if (manualEntry) 'manuallyBoardedBy': byEmail,
-        },
-      );
-
-      if (isWl) {
-        await _alertVibrate(3);
-        await _showResultScreen(
-          bg: Colors.red,
-          title: 'FLY PASSANGER ATTANTION!!!',
-          subtitle: 'RANDOM SELECTION SUCCESSFULL',
-        );
+      final legs = parseBcbp(raw);
+      if (legs.length == 1) {
+        pass = legs.single;
       } else {
-        await _showResultScreen(
-          bg: Colors.blue,
-          title: 'RANDOM SELECTION SUCCESSFULL',
-        );
+        pass = selectBcbpLeg(legs, expected, date);
       }
     }
+    if (normalizeFlightCode(pass.flightCode).isEmpty || pass.origin.isEmpty ||
+        (pass.julianDay == null && strictDate(pass.travelDate ?? '') == null) ||
+        pass.fullName.trim().isEmpty || pass.seat.isEmpty) {
+      throw const FormatException('Kart bilgileri eksik veya doğrulanamıyor. Manuel doğrulama gerekli.');
+    }
+    final error = validationError(pass, expected, date);
+    if (error != null) {
+      await _log('PAX_VALIDATION_BLOCKED', meta: {'reason': error});
+      await _alertVibrate(3);
+      await _showResultScreen(bg: Colors.purple, title: 'WRONG FLIGHT', subtitle: error);
+      return;
+    }
+    final isWl = await _isWatchlistMatch(pass.fullName, pnr: pass.pnr);
+    if (isWl) {
+      await _alertVibrate(3);
+      await _showResultScreen(bg: Colors.red, title: 'FLY PASSENGER ATTENTION!!!',
+        subtitle: 'Yalnız DFT Random ile devam edilebilir.');
+    }
+    if (!mounted) return;
+    final choice = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('Boarding Seçimi'),
+      content: Text('${pass.fullName} • ${pass.seat}'),
+      actions: [
+        TextButton(onPressed: isWl ? null : () => Navigator.pop(ctx, 'PRE'), child: const Text('Pre-BOARD')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, 'RANDOM'), child: const Text('DFT Random')),
+      ],
+    ));
+    if (choice == null) return;
+    _confirmedAdultId = null;
+    if (await _handleSeatDuplicateOrInfant(fullName: pass.fullName, seat: pass.seat, pnr: pass.pnr)) return;
+    var confirmedWatchlist = isWl;
+    try {
+      confirmedWatchlist = await BoardingRepository(widget.flightRef, widget.currentUid).board(pass,
+        random: choice == 'RANDOM', watchlist: isWl, manual: manualEntry, adultId: _confirmedAdultId);
+    } on DuplicateBoarding {
+      await _showResultScreen(bg: Colors.grey, title: 'ALREADY BOARDED / DUPLICATE');
+      return;
+    }
+    await _showResultScreen(bg: confirmedWatchlist ? Colors.red : choice == 'PRE' ? Colors.green : Colors.blue,
+      title: confirmedWatchlist ? 'FLY PASSENGER ATTENTION!!!' : choice == 'PRE' ? 'PRE-BOARD SUCCESSFUL' : 'DFT RANDOM SUCCESSFUL');
   }
 
+  String? _confirmedAdultId;
 
   bool _isBoardedStatus(String s) {
     final v = s.trim().toUpperCase();
@@ -3165,7 +2511,7 @@ Set<String> _flightCodeAlternatives(String code) {
     // Same seat already boarded. If same passenger => duplicate. Otherwise ask infant flow.
     final sameName = boarded.where((d) {
       final n = (d.data()['fullName'] ?? '').toString().trim().toUpperCase();
-      return n == fullName.trim().toUpperCase();
+      return watchlistMatches(n, fullName);
     }).toList();
 
     final hit = (sameName.isNotEmpty ? sameName.first : boarded.first);
@@ -3174,48 +2520,7 @@ Set<String> _flightCodeAlternatives(String code) {
     final boardedStatus = (hitData['status'] ?? '').toString();
 
     if (sameName.isNotEmpty) {
-      if (!mounted) return true;
-      final infantDup = await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Mükerrer Kart'),
-              content: Text(
-                'Bu yolcu zaten board edildi • Koltuk: $seatKey\n\nYolcu infant mı?',
-              ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
-                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Infant')),
-              ],
-            ),
-          ) ??
-          false;
-
-      if (infantDup) {
-        await _log('PAX_DUPLICATE_INFANT_OVERRIDE_ALLOWED', meta: {
-          'reason': 'seat_same_name_infant',
-          'seat': seatKey,
-          'fullName': fullName,
-          'pnr': pnr,
-          'existingPaxId': hit.id,
-          'existingStatus': boardedStatus,
-        });
-        return false;
-      }
-
-      await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
-        'reason': 'seat_same_name',
-        'seat': seatKey,
-        'fullName': fullName,
-        'pnr': pnr,
-        'existingPaxId': hit.id,
-        'existingStatus': boardedStatus,
-      });
-      await _alertVibrate(3);
-      await _showResultScreen(
-        bg: Colors.orange,
-        title: 'MUKERRER KART',
-        subtitle: 'Bu yolcu zaten board edildi • Koltuk: $seatKey',
-      );
+      await _showResultScreen(bg: Colors.grey, title: 'ALREADY BOARDED / DUPLICATE');
       return true;
     }
 
@@ -3233,6 +2538,7 @@ Set<String> _flightCodeAlternatives(String code) {
     );
 
     if (infant == true) {
+      _confirmedAdultId = hit.id;
       await _log('PAX_INFANT_SEAT_OVERRIDE_ALLOWED', meta: {
         'seat': seatKey,
         'newFullName': fullName,
@@ -3254,7 +2560,7 @@ Set<String> _flightCodeAlternatives(String code) {
     });
     await _alertVibrate(3);
     await _showResultScreen(
-      bg: Colors.orange,
+      bg: Colors.grey,
       title: 'MUKERRER KART',
       subtitle: 'Koltuk $seatKey zaten board edildi.',
     );
@@ -3269,32 +2575,6 @@ Set<String> _flightCodeAlternatives(String code) {
 
     final fullName = ((data['fullName'] ?? fallbackName) ?? '').toString();
     final seat = ((data['seat'] ?? fallbackSeat) ?? '').toString();
-    if (mounted) {
-      final infant = await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Mükerrer Kart'),
-              content: Text(
-                'Bu yolcu zaten board edildi${seat.isNotEmpty ? ' (Koltuk: $seat)' : ''}.\n\nYolcu infant mı?',
-              ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
-                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Infant')),
-              ],
-            ),
-          ) ??
-          false;
-      if (infant) {
-        await _log('PAX_DUPLICATE_INFANT_OVERRIDE_ALLOWED', meta: {
-          'paxId': paxRef.id,
-          'fullName': fullName,
-          'seat': seat,
-          'status': status,
-        });
-        return false;
-      }
-    }
-
     await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
       'paxId': paxRef.id,
       'fullName': fullName,
@@ -3305,7 +2585,7 @@ Set<String> _flightCodeAlternatives(String code) {
     if (!mounted) return true;
     await _alertVibrate(3);
     await _showResultScreen(
-      bg: Colors.orange,
+      bg: Colors.grey,
       title: 'MUKERRER KART',
       subtitle: 'Bu yolcu zaten board edildi${seat.isNotEmpty ? ' • Koltuk: $seat' : ''}',
     );
@@ -3352,88 +2632,12 @@ Set<String> _flightCodeAlternatives(String code) {
 
     if (selected == null) return;
 
-    if (!offload && await _showDuplicateIfNeeded(selected.reference)) {
-      return;
-    }
-
     if (offload) {
-      final byEmail = await _emailOf(widget.currentUid);
-      await selected.reference.set({
-        'status': 'OFFLOADED',
-        'offloadedAt': FieldValue.serverTimestamp(),
-        'offloadedByUid': widget.currentUid,
-        'offloadedByEmail': byEmail,
-      }, SetOptions(merge: true));
-      await _log('PAX_OFFLOADED_MANUAL', meta: {'paxId': selected.id});
+      await BoardingRepository(widget.flightRef, widget.currentUid).offload(selected.reference);
     } else {
-      // Offer PRE vs RANDOM with watchlist rules
       final data = selected.data();
-      final fullName = (data['fullName'] ?? '').toString();
-      final seat = (data['seat'] ?? '').toString();
-      final isWl = await _isWatchlistMatch(fullName);
-
-      final choice = await showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Boarding Seçimi'),
-          content: Text(isWl
-              ? 'WatchList MATCH: Sadece RANDOM SELECTION seçilebilir.'
-              : 'İki seçenek: Pre-BOARD veya DFT Random'),
-          actions: [
-            TextButton(
-              onPressed: isWl ? null : () => Navigator.pop(context, 'PRE'),
-              child: const Text('Pre-BOARD'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, 'RANDOM'),
-              child: const Text('DFT Random'),
-            ),
-          ],
-        ),
-      );
-      if (choice == null) return;
-
-      final byEmail = await _emailOf(widget.currentUid);
-      if (choice == 'PRE') {
-        await selected.reference.set({
-          'status': 'PREBOARDED',
-          'boardedAt': FieldValue.serverTimestamp(),
-          'boardedByUid': widget.currentUid,
-          'boardedByEmail': byEmail,
-          'manualBoarded': true,
-          'manualBoardedByEmail': byEmail,
-        }, SetOptions(merge: true));
-      await _autoMarkOpTimesForBoarding();
-      await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': fullName, 'seat': seat, 'manuallyBoardedBy': byEmail});
-        await _showResultScreen(bg: Colors.green, title: 'PRE-BOARD SUCCESSFULL');
-      } else {
-        await selected.reference.set({
-          'status': 'DFT_BOARDED',
-          'boardedAt': FieldValue.serverTimestamp(),
-          'boardedByUid': widget.currentUid,
-          'boardedByEmail': byEmail,
-          'manualBoarded': true,
-          'manualBoardedByEmail': byEmail,
-        }, SetOptions(merge: true));
-      await _autoMarkOpTimesForBoarding();
-      await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': fullName, 'seat': seat, 'watchlistMatch': isWl, 'manuallyBoardedBy': byEmail});
-        if (isWl) {
-          await _alertVibrate(3);
-          await _showResultScreen(
-            bg: Colors.red,
-            title: 'FLY PASSANGER ATTANTION!!!',
-            subtitle: 'RANDOM SELECTION SUCCESSFULL',
-          );
-        } else {
-          await _showResultScreen(bg: Colors.blue, title: 'RANDOM SELECTION SUCCESSFULL');
-        }
-      }
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(offload ? 'Offload işlendi' : 'Boarding işlendi')),
-      );
+      await _showManualScanDialogAndProcess(prefillName: data['fullName']?.toString(),
+        prefillSeat: data['seat']?.toString(), prefillPnr: data['pnr']?.toString());
     }
   }
 
@@ -3495,16 +2699,17 @@ Set<String> _flightCodeAlternatives(String code) {
     try {
       String inviteeEmail = normalizedInput;
       String inviteeUid = '';
-      QuerySnapshot<Map<String, dynamic>> userQ = await Db.users().where('usernameLower', isEqualTo: inviteeUsernameLower).limit(1).get();
-      if (userQ.docs.isEmpty && normalizedInput.contains('@')) {
-        userQ = await Db.users().where('email', isEqualTo: normalizedInput).limit(1).get();
-      }
-      if (userQ.docs.isNotEmpty) {
+      final userQ = await Db.users().where(
+        normalizedInput.contains('@') ? 'email' : 'usernameLower',
+        isEqualTo: normalizedInput.contains('@') ? normalizedInput : inviteeUsernameLower,
+      ).limit(2).get(const GetOptions(source: Source.server));
+      if (userQ.docs.length > 1) throw Exception('Kullanıcı adı belirsiz. Tam email adresi kullanın.');
+      if (userQ.docs.length == 1) {
         final u = userQ.docs.first;
         final ud = u.data();
         inviteeUid = u.id;
         inviteeEmail = (ud['email'] ?? inviteeEmail).toString().trim().toLowerCase();
-      } else if (!normalizedInput.contains('@')) {
+      } else {
         // Legacy users may not have usernameLower; try email fallback as username@domain guess is not safe.
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -3537,7 +2742,7 @@ Set<String> _flightCodeAlternatives(String code) {
         return;
       }
 
-      await Db.invites().add({
+      await Db.invites().doc('${widget.flightRef.id}_$inviteeUid').set({
         'flightId': widget.flightRef.id,
         'flightCode': flightCode,
         'inviteeEmail': inviteeEmail,
@@ -3578,15 +2783,15 @@ Set<String> _flightCodeAlternatives(String code) {
     final nm = (p['fullName'] ?? '').trim();
     final st = (p['seat'] ?? '').trim();
     final pn = (p['pnr'] ?? '').trim();
-    return 'RAW: ${_truncate(raw)}\nFLIGHT: $fc  SEAT: $st  PNR: $pn\nNAME: $nm';
+    return 'FLIGHT: $fc  SEAT: $st\nNAME: $nm';
   }
 
   Future<void> _onCameraDetect(BarcodeCapture capture) async {
-    if (!_cameraOn) return;
+    if (!_cameraOn || !_scanTabActive || _busy) return;
     String raw = '';
     for (final b in capture.barcodes) {
-      final v = (b.rawValue ?? b.displayValue ?? '').trim();
-      if (v.isNotEmpty) {
+      final v = b.rawValue ?? b.displayValue ?? '';
+      if (v.trim().isNotEmpty) {
         raw = v;
         break;
       }
@@ -3599,24 +2804,30 @@ Set<String> _flightCodeAlternatives(String code) {
     }
     _lastCamRaw = raw;
     _lastCamHitAt = now;
+    setState(() => _busy = true);
 
     try {
       final fSnap0 = await widget.flightRef.get();
       final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
-      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
+      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode,
+        expectedDate: (fSnap0.data()?['etdDateText'] ?? '').toString());
       if (mounted) {
         setState(() => _lastParsedPreview = _previewFromParsed(parsed, raw));
       }
       await _processScanString(raw);
     } catch (e) {
       if (mounted) {
-        setState(() => _lastParsedPreview = 'SCAN ERROR: $e\nRAW: ${_truncate(raw)}');
+        setState(() => _lastParsedPreview = 'Kart doğrulanamadı: $e');
       }
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
   @override
   void dispose() {
+    _tabs?.removeListener(_tabChanged);
+    _lastCamRaw = null;
     _manualScan.dispose();
     _ocrTextRecognizer.close();
     _scannerController.dispose();
@@ -3682,6 +2893,14 @@ Set<String> _flightCodeAlternatives(String code) {
                             ),
                           ],
                         ),
+                        Wrap(spacing: 8, children: [
+                          TextButton.icon(onPressed: _busy || isClosed ? null : _inviteUser,
+                            icon: const Icon(Icons.person_add), label: const Text('Ekibe Davet')),
+                          TextButton(onPressed: _busy || isClosed ? null : () => _manualBoardOrOffload(offload: false),
+                            child: const Text('Listeden Manuel Giriş')),
+                          TextButton(onPressed: _busy || isClosed ? null : () => _manualBoardOrOffload(offload: true),
+                            child: const Text('Offload')),
+                        ]),
                         const Divider(height: 24),
                         SizedBox(
                           width: double.infinity,
@@ -3707,7 +2926,7 @@ Set<String> _flightCodeAlternatives(String code) {
                                     ),
                                   ),
                                 ),
-                              if (!isClosed && _cameraOn) ...[
+                              if (!isClosed && _cameraOn && _scanTabActive) ...[
                                 const SizedBox(height: 8),
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(16),
@@ -3823,7 +3042,7 @@ Set<String> _flightCodeAlternatives(String code) {
                                       : () async {
                                           setState(() => _busy = true);
                                           try {
-                                            await _processScanString(_manualScan.text.trim(), manualEntry: true);
+                                            await _processScanString(_manualScan.text, manualEntry: true);
                                           } catch (e) {
                                             if (mounted) {
                                               ScaffoldMessenger.of(context).showSnackBar(
@@ -4028,71 +3247,8 @@ class _PaxListTabState extends State<PaxListTab> {
   }
 
   Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
-    final scannedKeys = _nameKeyVariants(fullName);
-    if (scannedKeys.isEmpty) return false;
-
-    bool _fuzzyTokenEq(String a, String b) {
-      final aa = a.trim().toUpperCase();
-      final bb = b.trim().toUpperCase();
-      if (aa.isEmpty || bb.isEmpty) return false;
-      if (aa == bb) return true;
-      final maxLen = aa.length > bb.length ? aa.length : bb.length;
-      if (maxLen <= 3) return false;
-      final dist = _levenshtein(aa, bb);
-      return maxLen >= 8 ? dist <= 2 : dist <= 1;
-    }
-
-    List<String> _tokensFromName(String s) {
-      var up = s.toUpperCase();
-      const titles = ['MR','MRS','MS','MISS','MSTR','MASTER','DR','PROF','SIR','MADAM','INF','INFT','INFANT','CHD','CHILD'];
-      up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
-      up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
-      up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
-      final toks = up.isEmpty ? <String>[] : up.split(' ').where((t) => t.isNotEmpty).toList();
-      while (toks.isNotEmpty && titles.contains(toks.first)) toks.removeAt(0);
-      while (toks.isNotEmpty && titles.contains(toks.last)) toks.removeLast();
-      return toks;
-    }
-
-    bool _strongNameMatch(String wlName) {
-      final wlKeys = _nameKeyVariants(wlName);
-      if (wlKeys.intersection(scannedKeys).isNotEmpty) return true;
-
-      final st = _tokensFromName(fullName);
-      final wt = _tokensFromName(wlName);
-      if (st.isEmpty || wt.isEmpty) return false;
-
-      final usedW = <int>{};
-      var matched = 0;
-      for (final sTok in st) {
-        for (var i = 0; i < wt.length; i++) {
-          if (usedW.contains(i)) continue;
-          if (_fuzzyTokenEq(sTok, wt[i])) {
-            usedW.add(i);
-            matched++;
-            break;
-          }
-        }
-      }
-
-      if (st.length >= 2 && wt.length >= 2) return matched >= 2;
-
-      final sJoined = st.join('');
-      final wJoined = wt.join('');
-      final maxLen = sJoined.length > wJoined.length ? sJoined.length : wJoined.length;
-      if (maxLen < 6) return false;
-      final ratio = (maxLen - _levenshtein(sJoined, wJoined)) / maxLen;
-      return ratio >= 0.82;
-    }
-
-    final snap = await widget.flightRef.collection('watchlist').limit(500).get();
-    for (final d in snap.docs) {
-      final data = d.data();
-      final wlName = (data['fullName'] ?? '').toString();
-      if (wlName.trim().isEmpty) continue;
-      if (_strongNameMatch(wlName)) return true;
-    }
-    return false;
+    final snap = await widget.flightRef.collection('watchlist').get(const GetOptions(source: Source.server));
+    return snap.docs.any((d) => watchlistMatches(fullName, (d.data()['fullName'] ?? '').toString(), pnr: pnr));
   }
 
   Set<String> _nameKeyVariants(String s) {
@@ -4169,68 +3325,15 @@ class _PaxListTabState extends State<PaxListTab> {
 
 
   Future<void> _manualBoard(QueryDocumentSnapshot<Map<String, dynamic>> paxDoc) async {
-    final data = paxDoc.data();
-    final name = (data['fullName'] ?? '').toString();
-    final seat = (data['seat'] ?? '').toString();
-    final isWl = await _isWatchlistMatch(name);
-
-    final choice = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Boarding Seçimi'),
-        content: Text(isWl
-            ? 'WatchList MATCH: Sadece RANDOM SELECTION seçilebilir.'
-            : 'İki seçenek: Pre-BOARD veya DFT Random'),
-        actions: [
-          TextButton(
-            onPressed: isWl ? null : () => Navigator.pop(context, 'PRE'),
-            child: const Text('Pre-BOARD'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, 'RANDOM'),
-            child: const Text('DFT Random'),
-          ),
-        ],
-      ),
-    );
-    if (choice == null) return;
-
-    final byEmail = await _emailOf(widget.currentUid);
-    if (choice == 'PRE') {
-      await paxDoc.reference.set({
-        'status': 'PREBOARDED',
-        'boardedAt': FieldValue.serverTimestamp(),
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        'manualBoarded': true,
-        'manualBoardedByEmail': byEmail,
-      }, SetOptions(merge: true));
-      await _autoMarkOpTimesForBoarding();
-      await _log('PAX_PREBOARDED_MANUAL', meta: {'fullName': name, 'seat': seat, 'manuallyBoardedBy': byEmail});
-    } else {
-      await paxDoc.reference.set({
-        'status': 'DFT_BOARDED',
-        'boardedAt': FieldValue.serverTimestamp(),
-        'boardedByUid': widget.currentUid,
-        'boardedByEmail': byEmail,
-        'manualBoarded': true,
-        'manualBoardedByEmail': byEmail,
-      }, SetOptions(merge: true));
-      await _autoMarkOpTimesForBoarding();
-      await _log('PAX_RANDOM_SELECTED_MANUAL', meta: {'fullName': name, 'seat': seat, 'watchlistMatch': isWl, 'manuallyBoardedBy': byEmail});
-    }
+    DefaultTabController.of(context).animateTo(0);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Boarding için Scan sekmesindeki manuel formda kartın uçuş, tarih ve kalkış bilgilerini doğrulayın.')));
   }
 
   Future<void> _manualOffload(QueryDocumentSnapshot<Map<String, dynamic>> paxDoc) async {
-    final byEmail = await _emailOf(widget.currentUid);
-    await paxDoc.reference.set({
-      'status': 'OFFLOADED',
-      'offloadedAt': FieldValue.serverTimestamp(),
-      'offloadedByUid': widget.currentUid,
-      'offloadedByEmail': byEmail,
-    }, SetOptions(merge: true));
-    await _log('PAX_OFFLOADED_MANUAL', meta: {'paxId': paxDoc.id});
+    await BoardingRepository(widget.flightRef, widget.currentUid).offload(paxDoc.reference);
   }
+
 }
 
 class _Section extends StatelessWidget {
@@ -5328,7 +4431,7 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
         try {
           await _controller.stop();
         } catch (_) {}
-        if (mounted) Navigator.of(context).pop(raw.trim());
+        if (mounted) Navigator.of(context).pop(raw);
         return;
       }
     }
