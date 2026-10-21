@@ -170,7 +170,11 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
  }
  Future<void> csv() async {
   await authorize(allowClosed:true);
-  String cell(dynamic v)=>'"${v.toString().replaceAll('"','""')}"';
+  String cell(dynamic v) {
+   var value=v.toString();
+   if(RegExp(r'^[=+@-]').hasMatch(value)) value="'$value";
+   return '"${value.replaceAll('"','""')}"';
+  }
   final text=['NAME,PNR,SEAT,SEQUENCE,STATUS,LP',...ledger!.passengers.map((p)=>
    [p['name'],p['pnr'],p['seat'],p['sequence'],p['status'],p['lp']==true?'LP':''].map(cell).join(','))].join('\r\n');
   final name='${ledger!.spec.code}_LOCAL.csv';
