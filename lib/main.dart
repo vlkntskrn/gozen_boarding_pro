@@ -3984,7 +3984,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
     return '';
   }
 
-  Future<XFile> _buildCsvFile() async {
+  Future<({XFile file, String name})> _buildCsvFile() async {
     final flightSnap = await widget.flightRef.get();
     final flight = flightSnap.data() ?? {};
     final flightCode = (flight['flightCode'] ?? 'FLIGHT').toString();
@@ -4026,15 +4026,16 @@ class _OpTimesTabState extends State<OpTimesTab> {
 
     final csv = const ListToCsvConverter().convert(rows);
     final safeCode = flightCode.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    return XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
+    final name = 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv';
+    return (file: XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
       mimeType: 'text/csv',
-      name: 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
+      name: name), name: name);
   }
 
   Future<void> _shareFinalReportAndCloseScreen() async {
     final file = await _buildCsvFile();
     await _log('REPORT_EXPORTED_AUTO_ON_OPERATION_FINISHED', meta: {'filename': file.name});
-    await Share.shareXFiles([file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Final Report');
+    await Share.shareXFiles([file.file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Final Report');
     if (!mounted) return;
     Navigator.of(context).pop(); // return to flight list (closed flights tab available)
   }
@@ -4257,7 +4258,7 @@ class _ReportTabState extends State<ReportTab> {
     });
   }
 
-  Future<XFile> _buildCsvFile() async {
+  Future<({XFile file, String name})> _buildCsvFile() async {
     final flightSnap = await widget.flightRef.get();
     final flightCode = (flightSnap.data()?['flightCode'] ?? 'FLIGHT').toString();
 
@@ -4305,9 +4306,10 @@ class _ReportTabState extends State<ReportTab> {
     final csv = const ListToCsvConverter().convert(rows);
 
     final safeCode = flightCode.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    return XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
+    final name = 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv';
+    return (file: XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
       mimeType: 'text/csv',
-      name: 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
+      name: name), name: name);
   }
 
   @override
@@ -4340,7 +4342,7 @@ class _ReportTabState extends State<ReportTab> {
                           try {
                             final file = await _buildCsvFile();
                             await _log('REPORT_EXPORTED', meta: {'filename': file.name});
-                            await Share.shareXFiles([file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Report');
+                            await Share.shareXFiles([file.file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Report');
                           } catch (e) {
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
