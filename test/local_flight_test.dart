@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
+import 'package:xml/xml.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gozen_boarding_pro/boarding_validation.dart';
 import 'package:gozen_boarding_pro/local_flight.dart';
@@ -41,6 +42,15 @@ void main(){
   final l=LocalFlight(spec,'agent',(s)async{throw StateError('disk full');});
   await expectLater(l.board(pass(),random:false),throwsStateError);expect(l.passengers,isEmpty);
  });
+ test('offload and reboard retain completed search details for the form',()async{
+  final l=LocalFlight(spec,'agent',(s)async{});
+  await l.board(pass(),random:true);final id=l.passengers.single['id'];
+  await l.searchDetails(id,'GBR','SEARCH COMPLETED');await l.offload(id);
+  await l.board(pass(),random:false);
+  expect(l.passengers.single['searched'],isTrue);
+  expect(l.passengers.single['nationality'],'GBR');
+  expect(l.passengers.single['remarks'],'SEARCH COMPLETED');
+ });
  test('LP badge watchlist DFT only and adult infant offload',()async{
   final l=LocalFlight(spec,'agent',(s)async{});
   await l.importLp(zipXml(lpXml()));await l.setWatchlist(['JOHN SMITH']);
@@ -71,7 +81,9 @@ void main(){
   expect(sheet,contains('LS196'));expect(sheet,contains('2026-10-20'));
   final ba=const FlightSpec('b','BA196','2026-10-20','DLM','LHR');
   final baReport=dailyForm(File('assets/forms/ba.xlsx').readAsBytesSync(),ba,l.snapshot);
-  expect(utf8.decode(ZipDecoder().decodeBytes(baReport).findFile('xl/worksheets/sheet1.xml')!.content as List<int>),contains('BA196'));
+  final baXml=utf8.decode(ZipDecoder().decodeBytes(baReport).findFile('xl/worksheets/sheet1.xml')!.content as List<int>);
+  expect(baXml,contains('BA196'));
+  expect(XmlDocument.parse(baXml).findAllElements('c').firstWhere((c)=>c.getAttribute('r')=='E25').innerText,'TEST SECURITY ONE');
   // Synthetic-only outputs for print-layout QA in CI.
   Directory('build/form-qa').createSync(recursive:true);
   File('build/form-qa/search.docx').writeAsBytesSync(word);

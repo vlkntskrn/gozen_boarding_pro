@@ -114,6 +114,7 @@ class LocalFlight {
     await change('PAX_BOARDED:${random?'DFT':'PRE'}:${p.sequence}:${p.fullName}',(d) {
       final pax=d['pax'] as Map<String,dynamic>;
       final identity=p.sequence.isNotEmpty?'seq:${p.sequence.replaceFirst(RegExp(r'^0+'),'')}':'name:${p.fullName}|${p.pnr}';
+      final previous=Map<String,dynamic>.from(pax[identity]??{});
       bool active(dynamic x)=>['PREBOARDED','DFT_BOARDED'].contains(x['status']);
       if(pax[identity]!=null && active(pax[identity])) throw StateError('ALREADY BOARDED / DUPLICATE');
       if(pax.values.any((x)=>active(x) && watchlistMatches(p.fullName,x['name'],pnr:p.pnr,watchPnr:x['pnr']))) {
@@ -128,8 +129,9 @@ class LocalFlight {
       if(watch && !random) throw StateError('FLY PASSENGER ATTENTION!!!');
       final hits=(d['lp'] as List).where((x)=>watchlistMatches(p.fullName,x['name'],pnr:p.pnr,watchPnr:x['pnr'])).toList();
       pax[identity]={'name':p.fullName,'pnr':p.pnr,'seat':p.seat,'sequence':p.sequence,
-        'status':random?'DFT_BOARDED':'PREBOARDED','searched':random,'lp':hits.length==1,'watch':watch,
-        'adultId':adultId,'nationality':'','remarks':'','by':actor,'at':DateTime.now().toUtc().toIso8601String()};
+        'status':random?'DFT_BOARDED':'PREBOARDED','searched':random || previous['searched']==true,'lp':hits.length==1,'watch':watch,
+        'adultId':adultId,'nationality':previous['nationality']??'','remarks':previous['remarks']??'',
+        'by':actor,'at':DateTime.now().toUtc().toIso8601String()};
       final times=d.putIfAbsent('times',()=> <String,dynamic>{}) as Map;
       times.putIfAbsent('boardingStarted',()=>DateTime.now().toIso8601String());
       times['lastPassenger']=DateTime.now().toIso8601String();

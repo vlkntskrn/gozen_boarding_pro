@@ -252,6 +252,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
    ]));
   final pax=l.passengers;
   final labels=<String,String>{...commonFields,...(l.spec.reportForm=='OPR-FRM-0012'?baFields:dailyFields)};
+  if(l.spec.reportForm=='OPR-FRM-0012') labels['staff']='Ad | Pozisyon: B.ROOM, RAMP, JETTY, CARGO ESCORT, BACK, AIRSIDER, INTERVIEWER, CABIN CREW INTERVIEWER';
   return Scaffold(appBar:AppBar(title:Text('${l.spec.code} • ${l.spec.origin} → ${l.spec.destination}')),
    bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:(i)=>setState(()=>tab=i),destinations:const [
     NavigationDestination(icon:Icon(Icons.qr_code_scanner),label:'Scan'),NavigationDestination(icon:Icon(Icons.people),label:'Yolcular'),

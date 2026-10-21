@@ -13,6 +13,7 @@ const dailyFields = <String,String>{
  'P4':'ETA','P5':'ATA','P6':'ETD','P7':'ATD','P8':'Transit bagaj','P9':'Rush bagaj','P10':'Local bagaj',
  'P11':'Yetersiz doküman','P12':'Sahte doküman','P15':'ETD marka/model/seri',
  'O13':'Fiziksel arama (X)','O14':'ETD arama (X)','G18':'Notlar','G33':'Delay code',
+ 'B45':'Gate Team Leader 1','B46':'Gate Team Leader 2','B48':'Baggage Sorting Area Chief','B49':'Airside Operations Chief',
 };
 const baFields = <String,String>{
  'E13':'Uçak tipi','E14':'Tescil','E15':'Shift başlangıcı','E16':'Shift bitişi',
@@ -20,6 +21,7 @@ const baFields = <String,String>{
  'L13':'ETA','L14':'ATA','L15':'ETD','L16':'ATD','L17':'Gate açılışı','L18':'Cabin crew varışı','L19':'Cabin crew kontrolü',
  'O12':'ETD marka/model/seri','O15':'Gate numarası','O16':'Transit bagaj','O17':'Rush bagaj','O18':'Local bagaj','O19':'Gate bagajı',
  'O20':'X-ray bagajı','N10':'Fiziksel arama (X)','N11':'ETD arama (X)','L24':'Notlar','M34':'Duty officer adı',
+ 'E35':'Gate Team Leader','E37':'A/C & Airside Ramp Chief',
 };
 const commonFields = <String,String>{
  'airline':'Havayolu adı','searchTl':'Aramayı yaptıran team leader','airlineRep':'Onaylayan havayolu temsilcisi',
@@ -87,7 +89,7 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
    for(var i=0;i<rows.length;i++) {
     final cells=rows[i].findElements('w:tc').toList(), index=page*15+i;
     // Converted legacy form otherwise lets the last signature line spill.
-    for(final height in rows[i].findAllElements('w:trHeight')) {height.setAttribute('w:val','420');}
+    for(final height in rows[i].findAllElements('w:trHeight')) {height.setAttribute('w:val','360');}
     if(cells.length!=6) throw const FormatException('Arama formu şablonu değişmiş.');
     final p=index<searched.length?searched[index]:null;
     final values=p==null?['${index+1})','','','','','']:[
@@ -101,6 +103,10 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
   for(final n in nodes.whereType<XmlElement>()) {
    if(n.name.qualified!='w:p') continue;
    final text=n.findAllElements('w:t').map((t)=>t.innerText).join();
+   if(text.startsWith('İMZA') && text.split('İMZA').length>2) {
+    _wordColumns(n,'İMZA (SIGNATURE): __________________','İMZA (SIGNATURE): __________________');
+    continue;
+   }
    if(!text.startsWith('ADI-SOYADI')) continue;
    final pair=signatory==0?['searchTl','airlineRep']:signatory==1?['agent1','agent2']:['agent3','agent4'];
    _wordColumns(n,'ADI-SOYADI: ${fields[pair[0]]??''}','ADI-SOYADI: ${fields[pair[1]]??''}');signatory++;
@@ -156,9 +162,25 @@ List<int> dailyForm(List<int> template,FlightSpec spec,Map<String,dynamic> data)
  if(staff.length>(ba?10:35)) throw const FormatException('Personel sayısı form kapasitesini aşıyor.');
  for(var i=0;i<(ba?10:35);i++) {
   final parts=i<staff.length?staff[i].split('|'):['',''];
-  put(ba?'E${24+i}':'B${9+i}',parts.first.trim());
+  put(ba?'E${24+i}':'B${9+i}',ba?'':parts.first.trim());
   if(ba) for(final col in ['F','G','H','I','J','K']) {put('$col${24+i}','');}
   if(!ba) put('C${9+i}',parts.length>1?parts[1].trim():'');
+ }
+ if(ba) {
+  const slots=<String,List<int>>{
+   'B.ROOM':[24],'B.ROOM B.RECONCILIATION':[24],'RAMP':[25],'JETTY':[26],
+   'CARGO ESCORT':[27],'BACK/GATE SEARCH':[28],'BACK':[28],
+   'RANDOM SEARCH AIRSIDER GATE':[29,30,31],'AIRSIDER':[29,30,31],
+   'INTERVIEWER':[32],'CABIN CREW INTERVIEWER':[33],
+  };
+  final used=<int>{};
+  for(final line in staff) {
+   final parts=line.split('|');
+   final position=parts.length>1?parts[1].trim().toUpperCase().replaceAll(RegExp(r'\s+'),' '):'';
+   final row=slots[position]?.where((r)=>!used.contains(r)).firstOrNull;
+   if(row==null) throw FormatException('BA personel pozisyonu/geçerli boş satır bulunamadı: $position');
+   used.add(row);put('E$row',parts.first.trim());
+  }
  }
  if(!ba) for(final pair in [('preBrief','E'),('postBrief','M')]) {
   final lines=(fields[pair.$1]??'').toString().split('\n');
