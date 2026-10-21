@@ -38,6 +38,44 @@ void main(){
   final tampered=restart.snapshot;tampered['logs'][0]['action']='FORGED';
   expect(()=>LocalFlight(spec,'agent',(s)async{},saved:jsonEncode(tampered)),throwsFormatException);
  });
+ test('combined Word LP isolates flight sections and requires PNR',(){
+  final first=lpXml(),second=lpXml().replaceAll('LS196','LS164').replaceAll('John Smith','Other Passenger');
+  String body(String xml)=>xml.substring(xml.indexOf('<w:body>')+8,xml.indexOf('</w:body>'));
+  final both='<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body(first)}${body(second)}</w:body></w:document>';
+  expect(parseLp(zipXml(both),spec).single.name,'John Smith');
+  expect(parseLp(zipXml(both),const FlightSpec('x','LS164','2026-10-20','DLM','GLA')).single.name,'Other Passenger');
+  expect(()=>parseLp(zipXml(both),const FlightSpec('x','LS922','2026-10-20','DLM','MAN')),throwsFormatException);
+  expect(lpPassengerMatches(pass(),const LpPassenger('John Smith','OTHER1','1')),isFalse);
+ });
+ test('LP matching supports joined names and securely bounded truncation',(){
+  BoardingPass card(String name,String seq)=>BoardingPass(fullName:name,pnr:'ABC123',origin:'DLM',destination:'GLA',flightCode:'LS196',seat:'1A',sequence:seq);
+  expect(lpPassengerMatches(card('SMITH/JOHNPAULMR','001'),const LpPassenger('John Paul Smith','ABC123','1')),isTrue);
+  final truncated='WORTHINGTON/CHRISTOPHERJAMES'.substring(0,20);
+  const lp=LpPassenger('Christopher James Worthington','ABC123','1');
+  expect(lpPassengerMatches(card(truncated,'001'),lp),isTrue);
+  expect(lpPassengerMatches(card(truncated,''),lp),isFalse);
+  expect(lpPassengerMatches(card(truncated,'002'),lp),isFalse);
+ });
+ test('LP itself requires DFT even without manually adding a watchlist',()async{
+  final l=LocalFlight(spec,'operator',(s)async{});await l.importLp(zipXml(lpXml()));
+  await expectLater(l.board(pass(),random:false),throwsStateError);
+  await l.board(pass(),random:true);expect(l.passengers.single['lp'],isTrue);
+ });
+ test('duplicate adult card can add one named linked infant without overwriting adult',()async{
+  String? saved;
+  final l=LocalFlight(spec,'first',(s)async{saved=s;});await l.board(pass(),random:false);
+  final parent=l.passengers.single['id'];
+  expect(l.duplicateFor(pass())!['id'],parent);
+  await expectLater(l.board(pass(),random:true,adultId:parent),throwsStateError);
+  await l.board(pass(name:'SMITH/BABY'),random:false,adultId:parent);
+  expect(l.passengers.length,2);expect(l.passengers.first['name'],'SMITH/JOHN');
+  expect(l.passengers.first['status'],'PREBOARDED');expect(l.passengers.last['adultId'],parent);
+  expect(l.passengers.last['infant'],isTrue);
+  await expectLater(l.board(pass(name:'SMITH/OTHERBABY'),random:false,adultId:parent),throwsStateError);
+  final reopened=LocalFlight(spec,'second',(s)async{},saved:saved);await reopened.offload(parent);
+  expect(reopened.passengers.every((p)=>p['status']=='OFFLOADED'),isTrue);
+  expect(LocalFlight.validAudit(reopened.snapshot),isTrue);
+ });
  test('failed persistence never reports boarding complete',()async{
   final l=LocalFlight(spec,'agent',(s)async{throw StateError('disk full');});
   await expectLater(l.board(pass(),random:false),throwsStateError);expect(l.passengers,isEmpty);

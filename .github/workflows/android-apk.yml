@@ -39,11 +39,23 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release
 
+      - name: Preserve live APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/gozen-live.apk
+
+      - name: Build local field-test APK
+        run: flutter build apk --release --dart-define=FIELD_TEST=true --build-number=2
+
+      - name: Upload field-test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozen-boarding-pro-field-test-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: gozen-boarding-pro-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/gozen-live.apk
 
       - name: Upload synthetic form samples
         uses: actions/upload-artifact@v4

@@ -23,6 +23,7 @@ import 'firebase_options.dart';
 import 'ocr_adapter.dart';
 import 'web_preview.dart';
 import 'dispatch_screen.dart';
+import 'field_test_screen.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -36,6 +37,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
+
+const fieldTestBuild=bool.fromEnvironment('FIELD_TEST',defaultValue:false);
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
@@ -266,7 +269,7 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations(const [
     DeviceOrientation.portraitUp,
   ]);
-  if (!kIsWeb) {
+  if (!kIsWeb && !fieldTestBuild) {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     await FirebaseFirestore.instance.clearPersistence();
     FirebaseFirestore.instance.settings = const Settings(persistenceEnabled:false);
@@ -306,7 +309,7 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       theme: _AppTheme.light(),
       darkTheme: _AppTheme.dark(),
       builder: (context, child) => _GlobalBackdrop(child: child ?? const SizedBox.shrink()),
-      home: kIsWeb ? WebPreviewScreen(liveBuilder: (_) => _WebAuthGate(
+      home: fieldTestBuild ? const FieldTestScreen() : kIsWeb ? WebPreviewScreen(liveBuilder: (_) => _WebAuthGate(
         onThemeChanged: setThemeMode, themeMode: _themeMode,
       )) : AuthGate(
         onThemeChanged: setThemeMode,

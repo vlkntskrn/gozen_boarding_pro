@@ -27,21 +27,42 @@ List<LpPassenger> parseLp(List<int> bytes, FlightSpec flight) {
   if (entry == null || entry.size > 10 * 1024 * 1024) throw const FormatException('Geçerli DOCX gerekli.');
   final doc = XmlDocument.parse(utf8.decode(entry.content as List<int>));
   String text(XmlElement e) => e.findAllElements('w:t').map((t)=>t.innerText).join('');
-  final paragraphs = doc.findAllElements('w:p').map(text).toList();
-  final header = paragraphs.firstWhere((p)=>p.startsWith('Flight Number:'),orElse:()=> '');
-  final match = RegExp(r'Flight Number:\s*([A-Z0-9]+)\s*\(([A-Z]{3})\s*-\s*([A-Z]{3})\)').firstMatch(header);
-  if (match == null || !flightCodesMatch(flight.code,match[1]!) || match[2]!=flight.origin || match[3]!=flight.destination) {
-    throw const FormatException('LP uçuşu veya kalkış/varış eşleşmiyor.');
+  final sections=<Map<String,dynamic>>[];
+  Map<String,dynamic>? current;
+  void walk(XmlElement element) {
+    if(element.name.local=='p') {
+      final value=text(element).trim();
+      if(value.toLowerCase().startsWith('flight number:')) {
+        current={'header':value,'dates':<String>[],'tables':<XmlElement>[]};sections.add(current!);
+      } else if(value.toLowerCase().startsWith('flight date & time:') && current!=null) {
+        (current!['dates'] as List<String>).add(value);
+      }
+      return;
+    }
+    if(element.name.local=='tbl') {if(current!=null)(current!['tables'] as List<XmlElement>).add(element);return;}
+    for(final child in element.childElements) {walk(child);}
   }
-  final dateLine = paragraphs.firstWhere((p)=>p.startsWith('Flight Date & Time:'),orElse:()=> '');
+  walk(doc.rootElement);
+  final selected=<Map<String,dynamic>>[];
+  for(final section in sections) {
+  final header=section['header'] as String;
+  final match = RegExp(r'Flight Number:\s*([A-Z0-9]+)\s*\(([A-Z]{3})\s*-\s*([A-Z]{3})\)').firstMatch(header);
+  if (match == null) throw const FormatException('LP uçuş başlığı okunamadı.');
+  if(!flightCodesMatch(flight.code,match[1]!) || match[2]!=flight.origin || match[3]!=flight.destination) continue;
+  final dates=section['dates'] as List<String>;
+  if(dates.length!=1) throw const FormatException('LP bölümünde tek uçuş tarihi olmalı.');
+  final dateLine=dates.single;
   final dm = RegExp(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})').firstMatch(dateLine);
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   if(dm==null) throw const FormatException('LP tarihi okunamadı.');
   final month = months.indexWhere((m)=>m.toLowerCase()==dm[2]!.toLowerCase())+1;
   final date = '${dm[3]}-${month.toString().padLeft(2,'0')}-${dm[1]!.padLeft(2,'0')}';
-  if(strictDate(date)==null || date!=flight.date) throw const FormatException('LP tarihi eşleşmiyor.');
+  if(strictDate(date)==null) throw const FormatException('LP tarihi geçersiz.');
+  if(date==flight.date) selected.add(section);
+  }
+  if(selected.length!=1) throw const FormatException('Seçili uçuş, tarih ve rotaya ait tek LP bölümü bulunamadı.');
   final rows = <LpPassenger>[];
-  for(final row in doc.findAllElements('w:tr')) {
+  for(final row in (selected.single['tables'] as List<XmlElement>).expand((t)=>t.findAllElements('w:tr'))) {
     final cells = row.findElements('w:tc').map(text).map((s)=>s.trim()).toList();
     if(cells.length<7 || int.tryParse(cells[0])==null) continue;
     final name = cells[2], pnr=cells[5].toUpperCase(), seq=cells[6];
@@ -52,6 +73,31 @@ List<LpPassenger> parseLp(List<int> bytes, FlightSpec flight) {
   }
   if(rows.isEmpty) throw const FormatException('LP yolcu tablosu bulunamadı.');
   return rows;
+}
+
+bool lpPassengerMatches(BoardingPass pass,LpPassenger entry) {
+  String seq(String s)=>s.replaceFirst(RegExp(r'^0+'),'');
+  if(pass.pnr.isEmpty || pass.pnr!=entry.pnr) return false;
+  if(pass.sequence.isNotEmpty && entry.sequence.isNotEmpty && seq(pass.sequence)!=seq(entry.sequence)) return false;
+  if(watchlistMatches(pass.fullName,entry.name)) return true;
+  String clean(String s)=>s.toUpperCase().replaceAll('İ','I').replaceAll('Ş','S').replaceAll('Ğ','G')
+    .replaceAll('Ü','U').replaceAll('Ö','O').replaceAll('Ç','C');
+  String compact(String s)=>clean(s).replaceAll(RegExp(r'[^A-Z]'),'');
+  if(pass.fullName.split('/').length!=2) return false;
+  final parts=pass.fullName.split('/'),surname=compact(parts[0]),given=compact(parts[1]);
+  const titles=['MASTER','MSTR','MISS','MRS','MR','MS','DR','INF','INFT'];
+  final givens=[given,for(final t in titles) if(given.endsWith(t)&&given.length>t.length+1)given.substring(0,given.length-t.length)];
+  final forms=<List<String>>[];
+  if(entry.name.contains('/')) {final p=entry.name.split('/');forms.add([compact(p.first),compact(p.last)]);}
+  else {
+    final tokens=clean(entry.name).replaceAll(RegExp(r'[^A-Z ]'),' ').split(RegExp(r'\s+')).where((t)=>t.isNotEmpty&&!titles.contains(t)).toList();
+    for(var i=1;i<tokens.length;i++) {
+      forms.add([tokens.sublist(i).join(),tokens.sublist(0,i).join()]);
+      forms.add([tokens.sublist(0,i).join(),tokens.sublist(i).join()]);
+    }
+  }
+  final truncated=pass.fullName.length==20&&pass.sequence.isNotEmpty&&entry.sequence.isNotEmpty;
+  return forms.any((f)=>f[0]==surname&&givens.any((g)=>f[1]==g || (truncated&&g.length>=3&&f[1].length>g.length&&f[1].startsWith(g))));
 }
 
 /// A serialized, durable local ledger. Mutations are copy-on-write: no green
@@ -104,16 +150,27 @@ class LocalFlight {
     return change('LP_IMPORTED:${list.length}',(d) {
       d['lp']=list.map((p)=>p.toJson()).toList();
       for(final p in (d['pax'] as Map).values) {
-        p['lp']=list.where((x)=>watchlistMatches(p['name'],x.name,pnr:p['pnr'],watchPnr:x.pnr)).length==1;
+        p['lp']=list.where((x)=>lpPassengerMatches(BoardingPass(fullName:p['name'],pnr:p['pnr'],sequence:p['sequence'],
+          seat:p['seat'],origin:spec.origin,destination:spec.destination,flightCode:spec.code),x)).length==1;
       }
     });
+  }
+  List<LpPassenger> lpHits(BoardingPass p)=>(_data['lp'] as List).map((x)=>LpPassenger(x['name'],x['pnr'],x['sequence']))
+    .where((x)=>lpPassengerMatches(p,x)).toList();
+  bool needsDft(BoardingPass p)=>lpHits(p).isNotEmpty || (_data['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
+  Map<String,dynamic>? duplicateFor(BoardingPass p) {
+    String seq(String s)=>s.replaceFirst(RegExp(r'^0+'),'');
+    for(final x in passengers.where((x)=>['PREBOARDED','DFT_BOARDED'].contains(x['status']))) {
+      if((p.sequence.isNotEmpty&&seq(p.sequence)==seq(x['sequence']??'')) || watchlistMatches(p.fullName,x['name'])) return x;
+    }
+    return null;
   }
   Future<void> board(BoardingPass p,{required bool random,String? adultId}) async {
     final error=spec.validate(p);
     if(error!=null) {await log('SCAN_REJECTED:ROUTE_OR_DATE');throw FormatException(error);}
     await change('PAX_BOARDED:${random?'DFT':'PRE'}:${p.sequence}:${p.fullName}',(d) {
       final pax=d['pax'] as Map<String,dynamic>;
-      final identity=p.sequence.isNotEmpty?'seq:${p.sequence.replaceFirst(RegExp(r'^0+'),'')}':'name:${p.fullName}|${p.pnr}';
+      final identity=adultId!=null?'infant:$adultId':p.sequence.isNotEmpty?'seq:${p.sequence.replaceFirst(RegExp(r'^0+'),'')}':'name:${p.fullName}|${p.pnr}';
       final previous=Map<String,dynamic>.from(pax[identity]??{});
       bool active(dynamic x)=>['PREBOARDED','DFT_BOARDED'].contains(x['status']);
       if(pax[identity]!=null && active(pax[identity])) throw StateError('ALREADY BOARDED / DUPLICATE');
@@ -124,14 +181,21 @@ class LocalFlight {
       if(seated.isNotEmpty && (adultId==null || seated.length!=1 || seated.single.key!=adultId || seated.single.value['adultId']!=null)) {
         throw StateError('SEAT_OCCUPIED: Yetişkin ve infant bağlantısı doğrulanmalı.');
       }
-      if(adultId!=null && seated.isEmpty) throw StateError('Bağlı yetişkin bulunamadı.');
-      final watch=(d['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
+      if(adultId!=null) {
+        final parent=pax[adultId];
+        if(parent==null || !active(parent) || parent['adultId']!=null || parent['seat']!=p.seat) throw StateError('Bağlı yetişkin bulunamadı.');
+        if(pax.values.any((x)=>active(x)&&x['adultId']==adultId)) throw StateError('INFANT_ALREADY_LINKED');
+      }
+      final matches=(d['lp'] as List).where((x)=>lpPassengerMatches(p,LpPassenger(x['name'],x['pnr'],x['sequence']))).toList();
+      if(matches.length>1) throw StateError('LP EŞLEŞMESİ BELİRSİZ');
+      if((d['lp'] as List).isNotEmpty && p.pnr.isEmpty) throw StateError('LP KONTROLÜ İÇİN PNR GEREKLİ');
+      final watch=matches.isNotEmpty || (d['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
       if(watch && !random) throw StateError('FLY PASSENGER ATTENTION!!!');
-      final hits=(d['lp'] as List).where((x)=>watchlistMatches(p.fullName,x['name'],pnr:p.pnr,watchPnr:x['pnr'])).toList();
       pax[identity]={'name':p.fullName,'pnr':p.pnr,'seat':p.seat,'sequence':p.sequence,
-        'status':random?'DFT_BOARDED':'PREBOARDED','searched':random || previous['searched']==true,'lp':hits.length==1,'watch':watch,
+        'status':random?'DFT_BOARDED':'PREBOARDED','searched':random || previous['searched']==true,'lp':matches.length==1,'watch':watch,
         'adultId':adultId,'nationality':previous['nationality']??'','remarks':previous['remarks']??'',
         'by':actor,'at':DateTime.now().toUtc().toIso8601String()};
+      if(adultId!=null) pax[identity]['infant']=true;
       final times=d.putIfAbsent('times',()=> <String,dynamic>{}) as Map;
       times.putIfAbsent('boardingStarted',()=>DateTime.now().toIso8601String());
       times['lastPassenger']=DateTime.now().toIso8601String();

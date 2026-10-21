@@ -16,14 +16,17 @@ import 'ocr_adapter.dart';
 
 class LocalOperationsScreen extends StatefulWidget {
  final String flightId;
- const LocalOperationsScreen({super.key,required this.flightId});
+ final FlightSpec? localTestFlight;
+ final String localTestActor;
+ const LocalOperationsScreen({super.key,required this.flightId,this.localTestFlight,this.localTestActor='FIELD_TEST'});
  @override State<LocalOperationsScreen> createState()=>_LocalOperationsScreenState();
 }
 class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
  final storage=FlightLocalStorage(),raw=TextEditingController();
  final scanner=MobileScannerController(formats:const [BarcodeFormat.qrCode,BarcodeFormat.pdf417,BarcodeFormat.aztec,BarcodeFormat.dataMatrix]);
  late final ref=FirebaseFirestore.instance.collection('flights').doc(widget.flightId);
- String get uid=>FirebaseAuth.instance.currentUser!.uid;
+ bool get localTest=>widget.localTestFlight!=null;
+ String get uid=>localTest?widget.localTestActor:FirebaseAuth.instance.currentUser!.uid;
  Map<String,dynamic>? metadata;
  LocalFlight? ledger;
  String? error;
@@ -33,6 +36,15 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
  @override void dispose(){scanner.dispose();raw.dispose();super.dispose();}
  Future<void> load() async {
   try {
+   if(localTest) {
+    final spec=widget.localTestFlight!;
+    metadata={'flightCode':spec.code,'etdDateText':spec.date,'departureAirport':spec.origin,'arrivalAirport':spec.destination,
+      'reportRecipients':<String>[],'closed':false};
+    recorder=true;
+    ledger=LocalFlight(spec,uid,(value)=>storage.write(widget.flightId,value),saved:await storage.read(widget.flightId));
+    await ledger!.log('FIELD_TEST_FLIGHT_OPENED');
+    if(mounted)setState((){});return;
+   }
    final f=(await ref.get(const GetOptions(source:Source.server))).data();
    if(f==null) throw StateError('Uçuş bulunamadı.');
    metadata=f;
@@ -48,6 +60,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
   if(mounted) setState((){});
  }
  Future<void> authorize({bool allowClosed=false}) async {
+  if(localTest) {if(!allowClosed&&ledger?.closed==true)throw StateError('Test uçuşu kapalı.');return;}
   // Fail closed on revoked assignment, wrong device or stale/offline metadata.
   final f=(await ref.get(const GetOptions(source:Source.server))).data();
   if(f==null || f['recordingDeviceHash']!=await storage.deviceId() || f['recordingUid']!=uid || (!allowClosed && f['closed']==true)) {
@@ -92,29 +105,59 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
     await l.log('SCAN_REJECTED:FLIGHT_DATE_ROUTE');
     await result(Colors.purple,'WRONG FLIGHT','Uçuş numarası, tarih, kalkış veya varış eşleşmiyor.');return;
    }
-   final p=hits.single;
-   final seated=l.passengers.where((x)=>x['seat']==p.seat && ['PREBOARDED','DFT_BOARDED'].contains(x['status'])).toList();
-   String? adult;
-   if(seated.isNotEmpty && !seated.any((x)=>watchlistMatches(p.fullName,x['name']))) {
-    if(!mounted) return;
-    final ok=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(title:const Text('Aynı koltukta yetişkin / infant'),
-     content:Text('${seated.first['name']} ile aynı koltuk. Yeni kartın bağlı infant olduğunu doğruladınız mı?'),
-     actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Vazgeç')),
-      FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Infant olarak bağla'))]));
-    if(ok!=true) {await l.log('INFANT_LINK_CANCELLED');return;}adult=seated.first['id'];
-   }
-   await authorize();
-   await l.board(p,random:random,adultId:adult);
-   final watch=(l.snapshot['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
-   await result(watch?Colors.red:random?Colors.blue:Colors.green,
-    watch?'FLY PASSENGER ATTENTION!!!':random?'DFT RANDOM SUCCESSFUL':'PRE-BOARD SUCCESSFUL',
-    '${p.fullName} • ${p.seat}');
+   await boardPass(hits.single);
   } on FormatException catch(e) {
    await l.log('SCAN_UNREADABLE');await result(Colors.blueGrey,'KART DOĞRULANAMADI',e.message);
   } on StateError catch(e) {
    await l.log(e.message=='FLY PASSENGER ATTENTION!!!'?'WATCHLIST_BLOCKED':'BOARDING_BLOCKED');
    await result(e.message=='FLY PASSENGER ATTENTION!!!'?Colors.red:Colors.grey,e.message.toString(),'Kayıt eklenmedi.');
   }
+ }
+ Future<void> boardPass(BoardingPass original) async {
+  final l=ledger!;
+  var p=original;
+  final duplicate=l.duplicateFor(p);
+  final seated=l.passengers.where((x)=>x['seat']==p.seat&&['PREBOARDED','DFT_BOARDED'].contains(x['status'])).toList();
+  Map<String,dynamic>? parent=duplicate??(seated.isEmpty?null:seated.first);
+  if(p.seat=='INF'&&parent==null) {
+   final adults=l.passengers.where((x)=>x['adultId']==null&&['PREBOARDED','DFT_BOARDED'].contains(x['status'])).toList();
+   if(adults.isEmpty)throw StateError('Önce bağlı yetişkinin kartını okutun.');
+   if(!mounted)return;
+   parent=await showDialog<Map<String,dynamic>>(context:context,builder:(ctx)=>SimpleDialog(title:const Text('Infantın bağlı yetişkinini seç'),
+    children:[for(final a in adults)SimpleDialogOption(onPressed:()=>Navigator.pop(ctx,a),child:Text('${a['name']} • ${a['seat']}'))]));
+   if(parent==null){await l.log('INFANT_PARENT_SELECTION_CANCELLED');return;}
+  }
+  String? adultId;
+  if(parent!=null) {
+   final adult=parent;
+   if(!mounted)return;
+   final confirmed=await showDialog<bool>(context:context,barrierDismissible:false,builder:(ctx)=>AlertDialog(
+    title:const Text('Yolcu infant mı?'),content:Text('${duplicate!=null?'Bu kart/güvenlik numarası daha önce okutulmuş.':'Bu koltukta kayıt var.'}\n'
+      '${adult['name']} • ${adult['seat']}\nInfant ise yetişkinden ayrı ve bağlantılı bir kayıt oluşturulacak.'),
+    actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Hayır / Vazgeç')),
+     FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Evet, infant'))]));
+   await l.log(confirmed==true?'INFANT_CONFIRMED:${adult['id']}':'INFANT_DECLINED:${adult['id']}');
+   if(confirmed!=true){await result(Colors.grey,'ALREADY BOARDED / DUPLICATE','İkinci boarding kaydı oluşturulmadı.');return;}
+   if(adult['adultId']!=null)throw StateError('Infant kaydına başka infant bağlanamaz.');
+   var name=p.fullName;
+   if(watchlistMatches(name,adult['name'])) {
+    final fields=await fieldsDialog('Infant yolcu bilgisi',const {'name':'Infant adı SOYAD/AD (kartla doğrulayın)'},{});
+    if(fields==null){await l.log('INFANT_DETAILS_CANCELLED');return;}
+    name=fields['name']!.trim().toUpperCase();
+    if(name.split('/').length!=2||name.split('/').any((s)=>s.trim().isEmpty)||watchlistMatches(name,adult['name'])) {
+     throw const FormatException('Infantın ayrı adını SOYAD/AD biçiminde girin. Yetişkinin adı tekrar kullanılamaz.');
+    }
+   }
+   if(p.seat!='INF'&&p.seat!=adult['seat'])throw StateError('Infant ile bağlı yetişkinin koltuğu uyuşmuyor.');
+   p=BoardingPass(fullName:name,pnr:p.pnr,seat:adult['seat'],sequence:p.sequence,flightCode:p.flightCode,
+    origin:p.origin,destination:p.destination,julianDay:p.julianDay,travelDate:p.travelDate);
+   adultId=adult['id'];
+  }
+  await authorize();await l.board(p,random:random,adultId:adultId);
+  final watch=l.needsDft(p),lp=l.lpHits(p).length==1;
+  await result(watch?Colors.red:random?Colors.blue:Colors.green,
+   watch?'FLY PASSENGER ATTENTION!!!':random?'DFT RANDOM SUCCESSFUL':'PRE-BOARD SUCCESSFUL',
+   '${p.fullName}${lp?' • LP':''} • ${p.seat}${adultId!=null?' • INFANT':''}');
  }
  Future<Map<String,String>?> fieldsDialog(String title,Map<String,String> labels,Map<String,dynamic> values) async {
   final controllers={for(final key in labels.keys) key:TextEditingController(text:'${values[key]??''}')};
@@ -140,10 +183,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
   }
   try {
    await ledger!.log('MANUAL_VERIFICATION');
-   await ledger!.board(p,random:random);
-   final watch=(ledger!.snapshot['watchlist'] as List).any((n)=>watchlistMatches(p.fullName,n.toString()));
-   await result(watch?Colors.red:random?Colors.blue:Colors.green,
-    watch?'FLY PASSENGER ATTENTION!!!':random?'DFT RANDOM SUCCESSFUL':'PRE-BOARD SUCCESSFUL',p.fullName);
+   await boardPass(p);
   } on StateError catch(e) {
    await ledger!.log('MANUAL_BLOCKED');
    await result(e.message=='FLY PASSENGER ATTENTION!!!'?Colors.red:Colors.grey,e.message.toString(),'Kayıt eklenmedi.');
@@ -199,7 +239,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
   await authorize(allowClosed:true);
   if(!ledger!.closed) throw StateError('Önce uçuşu kapatın.');
   final files=await reports();
-  if(useComposer) {
+  if(useComposer || localTest) {
    final paths=await storage.exportFiles(widget.flightId,files);
    await storage.compose(List<String>.from(metadata!['reportRecipients']??[]),'${ledger!.spec.code} ${ledger!.spec.date} Uçuş Raporları',paths);
    await ledger!.mailOpened();return;
@@ -217,10 +257,11 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
  }
  Future<void> closeFlight() async {
   await authorize();
-  if((metadata!['reportRecipients'] as List? ?? []).isEmpty) throw StateError('Admin rapor alıcılarını tanımlamalı.');
+  if(!localTest && (metadata!['reportRecipients'] as List? ?? []).isEmpty) throw StateError('Admin rapor alıcılarını tanımlamalı.');
   if(!mounted) return;
   final ok=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(title:const Text('Uçuşu kapat'),
-   content:Text('Arama formu ve ${ledger!.spec.reportForm} hazırlanacak. Yeni boarding duracak. E-posta alıcıları: ${(metadata!['reportRecipients'] as List).join(', ')}'),
+   content:Text(localTest?'Test uçuşu kapanacak, raporlar hazırlanacak ve e-posta uygulaması açılacak. Alıcıyı seçip Gönder düğmesine basmalısınız.':
+    'Arama formu ve ${ledger!.spec.reportForm} hazırlanacak. Yeni boarding duracak. E-posta alıcıları: ${(metadata!['reportRecipients'] as List).join(', ')}'),
    actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Vazgeç')),
     FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Kapat ve gönder'))]));
   if(ok!=true) return;
@@ -232,6 +273,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
  }
  Future<void> finalizeClosure() async {
   await authorize(allowClosed:true);
+  if(localTest){metadata!['closed']=true;return;}
   if(metadata!['closed']==true) return;
   final batch=FirebaseFirestore.instance.batch();
   batch.update(ref,{'closed':true,'closedAt':FieldValue.serverTimestamp()});
@@ -259,6 +301,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
     NavigationDestination(icon:Icon(Icons.assignment),label:'Operasyon'),NavigationDestination(icon:Icon(Icons.history),label:'Log / Rapor')]),
    body:Column(children:[
     MaterialBanner(content:Text('${l.spec.date} • ${l.closed?'KAPALI':'AÇIK'} • ${pax.length} kayıt • Yalnız bu telefon\nMail: ${l.snapshot['mail']}'),actions:const [SizedBox.shrink()]),
+    if(localTest) const Padding(padding:EdgeInsets.all(8),child:Text('SAHA TESTİ • Kayıtlar bu cihazda şifreli saklanır. Canlı dashboard bağlantısı yoktur.')),
     if(busy) const LinearProgressIndicator(),
     Expanded(child:[
      page([

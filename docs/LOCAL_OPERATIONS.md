@@ -107,3 +107,33 @@ emulator erişim/PII engeli, sunucu form doğrulama testleri. Synthetic form
 örnekleri build/form-qa altındadır. Gerçek cihaz Keystore, yeniden başlatma,
 kamera/fener, imza sonrası çıktı ve gerçek SMTP/App Check uçtan uca testi ayrıca
 gereklidir. Canlı hesap/parola ve gerçek yolcu fixture'ı depoya eklenmez.
+# Android field-test APK update
+
+The field-test APK is built with `--dart-define=FIELD_TEST=true`. It opens a local
+flight selector (including LS164/LS922) without initializing Firebase. Local
+flight IDs are prefixed `fieldtest-`; test records use the same encrypted storage
+and report generator as native operations. Default/live builds still require
+approved Firebase profiles. This APK does not create or grant Admin accounts.
+No automatic email delivery or central anonymous dashboard is claimed by this
+test build. Closing a test flight opens the native mail composer with reports;
+the operator must choose recipients and send. App removal may lose local data.
+
+Duplicate/same-seat scans ask whether the passenger is an infant. Declining
+does not board again. Confirming a repeated adult card requires a separately
+verified infant name, creates one linked child identity, preserves the adult
+record and logs the confirmation and boarding. Shared adult SEC is permitted
+only within this explicit linked infant flow; ordinary duplicate scans remain
+blocked. Offloading an adult also offloads its linked infant. An INF seat can
+select an already boarded adult explicitly.
+
+Word LP now selects one matching flight/date/route section from a combined
+document. Name matching handles joined names and 20-character truncation, with
+PNR and SEC guards. A unique LP match itself requires DFT. Original uploaded
+passenger files are never committed. Device camera/Keystore testing is still
+required on physical Android hardware.
+
+Admin provisioning requires trusted Firebase credentials. The preparation
+script `scripts/provision-admin-accounts.cjs` reads company emails/passwords
+from stdin and uses Admin SDK; it is not an app endpoint. There were no Firebase
+admin credentials in this execution environment, so requested accounts have
+not been created or passwords changed here.
