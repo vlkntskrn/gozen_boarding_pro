@@ -156,12 +156,18 @@ BoardingPass selectBcbpLeg(
   return hits.single;
 }
 
-String? validationError(BoardingPass p, String expected, String date) {
+String? validationError(BoardingPass p, String expected, String date, {
+  String expectedOrigin = 'DLM', String? expectedDestination,
+}) {
   final d = strictDate(date);
   if (d == null) return 'Uçuş tarihi tanımlı/geçerli değil.';
   if (!flightCodesMatch(expected, p.flightCode))
     return 'Uçuş numarası eşleşmiyor.';
-  if (p.origin != 'DLM') return 'Kalkış havalimanı DLM değil.';
+  if (!RegExp(r'^[A-Z]{3}$').hasMatch(expectedOrigin) || p.origin != expectedOrigin) return 'Kalkış havalimanı eşleşmiyor.';
+  if (expectedDestination != null &&
+      (!RegExp(r'^[A-Z]{3}$').hasMatch(expectedDestination) || p.destination != expectedDestination)) {
+    return 'Varış havalimanı eksik veya eşleşmiyor.';
+  }
   if (p.julianDay != null) {
     final julian = d.difference(DateTime.utc(d.year)).inDays + 1;
     if (p.julianDay != julian) return 'Uçuş günü eşleşmiyor.';

@@ -3,7 +3,7 @@ name: Android APK Build
 on:
   workflow_dispatch:
   push:
-    branches: [ "main", "fix/security-boarding-validation", "feat/web-preview" ]
+    branches: [ "main", "fix/security-boarding-validation", "feat/web-preview", "feat/local-flight-operations" ]
 
 jobs:
   build-apk:
@@ -42,6 +42,12 @@ jobs:
           name: gozen-boarding-pro-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
+      - name: Upload synthetic form samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-form-qa
+          path: build/form-qa
+
   firestore-rules:
     runs-on: ubuntu-latest
     steps:
@@ -55,3 +61,6 @@ jobs:
           node-version: '22'
       - run: npm ci --prefix security-tests
       - run: security-tests/node_modules/.bin/firebase emulators:exec --project demo-gozen-security --only firestore "node --test security-tests/rules.test.cjs"
+      - run: npm ci --prefix functions
+      - run: npm run lint --prefix functions
+      - run: npm test --prefix functions

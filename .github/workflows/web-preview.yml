@@ -2,7 +2,7 @@ name: Flutter Web Preview
 on:
   workflow_dispatch:
   push:
-    branches: ["feat/web-preview"]
+    branches: ["feat/web-preview", "feat/local-flight-operations"]
 jobs:
   build-web:
     runs-on: ubuntu-latest

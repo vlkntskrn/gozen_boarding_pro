@@ -22,6 +22,7 @@ import 'boarding_repository.dart';
 import 'firebase_options.dart';
 import 'ocr_adapter.dart';
 import 'web_preview.dart';
+import 'dispatch_screen.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -29,6 +30,7 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -266,6 +268,7 @@ Future<void> main() async {
   ]);
   if (!kIsWeb) {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    await FirebaseAppCheck.instance.activate(androidProvider: AndroidProvider.playIntegrity);
   }
   runApp(const GozenBoardingApp());
 }
@@ -367,7 +370,7 @@ class AuthGate extends StatelessWidget {
                 TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Çıkış')),
               ])));
             }
-            return HomeScreen(onThemeChanged: onThemeChanged, themeMode: themeMode);
+            return DispatchScreen(logout:()=>FirebaseAuth.instance.signOut());
           },
         );
       },

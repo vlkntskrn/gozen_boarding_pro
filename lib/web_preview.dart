@@ -86,7 +86,7 @@ class _WebPreviewScreenState extends State<WebPreviewScreen> {
     try {
       final legs = parseBcbp(_raw.text);
       final pass = legs.length == 1 ? legs.single : selectBcbpLeg(legs, _code, _date);
-      final error = validationError(pass, _code, _date);
+      final error = validationError(pass, _code, _date, expectedDestination:_selected!.destination);
       if (error != null) { await _result(Colors.purple, 'WRONG FLIGHT', error); return; }
       final key = pass.sequence.isNotEmpty ? pass.sequence : '${pass.fullName}|${pass.seat}';
       if (_pax[key]?['status'] == 'PREBOARDED' || _pax[key]?['status'] == 'DFT_BOARDED') {
