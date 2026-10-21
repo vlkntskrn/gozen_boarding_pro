@@ -98,6 +98,8 @@ void main(){
   final bytes=searchForm(File('assets/forms/search.docx').readAsBytesSync(),spec,l.snapshot);
   final xml=XmlDocument.parse(utf8.decode(ZipDecoder().decodeBytes(bytes).findFile('word/document.xml')!.content as List<int>));
   expect(xml.findAllElements('w:tbl').length,2);
+  expect(xml.findAllElements('w:t').where((e)=>e.innerText.contains('PASSENGER CONTINUOUS & RANDOM SEARCH')).length,2);
+  expect(xml.findAllElements('w:t').where((e)=>e.innerText.contains('OPR-FRM-0098')).length,2);
   final ids=xml.findAllElements('wp:docPr').map((e)=>e.getAttribute('id')).toList();
   expect(ids.toSet().length,ids.length);
   final names=xml.findAllElements('w:t').map((e)=>e.innerText).join(' ');

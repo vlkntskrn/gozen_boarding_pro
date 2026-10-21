@@ -67,15 +67,44 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
  final z=ZipDecoder().decodeBytes(template), file=z.findFile('word/document.xml')!;
  final doc=XmlDocument.parse(utf8.decode(file.content as List<int>));
  final body=doc.findAllElements('w:body').single;
+ final relationships=XmlDocument.parse(utf8.decode(z.findFile('word/_rels/document.xml.rels')!.content as List<int>));
+ final headerRels=XmlDocument.parse(utf8.decode(z.findFile('word/_rels/header1.xml.rels')!.content as List<int>));
+ final headerIds=<String,String>{};
+ for(final relation in headerRels.rootElement.childElements) {
+  final id='rIdFormHeader${headerIds.length}';
+  headerIds[relation.getAttribute('Id')!]=id;
+  final copy=relation.copy()..setAttribute('Id',id);
+  relationships.rootElement.children.add(copy);
+ }
+ List<XmlElement> furniture(String path)=>XmlDocument.parse(utf8.decode(z.findFile(path)!.content as List<int>))
+  .rootElement.childElements.where((p)=>p.findAllElements('w:t').any((t)=>t.innerText.trim().isNotEmpty) || p.findAllElements('w:drawing').isNotEmpty).toList();
+ final header=furniture('word/header1.xml'),footer=furniture('word/footer1.xml');
  final original=body.children.where((n)=>n is! XmlElement || n.name.local!='sectPr').map((n)=>n.copy()).toList();
  final section=body.findElements('w:sectPr').firstOrNull?.copy();
+ section?.children.removeWhere((n)=>n is XmlElement && ['headerReference','footerReference'].contains(n.name.local));
  final searched=Map<String,dynamic>.from(data['pax']).values.where((p)=>p['searched']==true).toList();
  final fields=Map<String,dynamic>.from(data['fields']);
  body.children.clear();
  final pages=searched.isEmpty?1:(searched.length/15).ceil();
  if(pages>1000) throw const FormatException('Arama formu kapasitesi aşıldı.');
+ XmlElement pageBreak()=>XmlElement(XmlName('p','w'),[],[XmlElement(XmlName('r','w'),[],[
+  XmlElement(XmlName('br','w'),[XmlAttribute(XmlName('type','w'),'page')])])]);
  for(var page=0;page<pages;page++) {
-  if(page>0) body.children.add(XmlElement(XmlName('p','w'),[],[XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('br','w'),[XmlAttribute(XmlName('type','w'),'page')])])]));
+  if(page>0) body.children.add(pageBreak());
+  // Put the template's actual logo/title/footer into each form body. Legacy
+  // DOC headers otherwise migrate to the last page when a form is repeated.
+  for(final item in header) {
+   final copy=item.copy();
+   for(final graphic in [...copy.findAllElements('wp:docPr'),...copy.findAllElements('pic:cNvPr')]) {
+    final id=int.tryParse(graphic.getAttribute('id')??'');
+    if(id!=null) graphic.setAttribute('id','${100000000+id+page*10000}');
+   }
+   for(final image in copy.findAllElements('a:blip')) {
+    final target=headerIds[image.getAttribute('r:embed')];
+    if(target!=null) image.setAttribute('r:embed',target);
+   }
+   body.children.add(copy);
+  }
   final nodes=original.map((n)=>n.copy()).toList();
   if(page>0) for(final n in nodes.whereType<XmlElement>()) {
    for(final graphic in [...n.findAllElements('wp:docPr'),...n.findAllElements('pic:cNvPr')]) {
@@ -118,7 +147,12 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
    final pair=signatory==0?['searchTl','airlineRep']:signatory==1?['agent1','agent2']:['agent3','agent4'];
    _wordColumns(n,'ADI-SOYADI: ${fields[pair[0]]??''}','ADI-SOYADI: ${fields[pair[1]]??''}');signatory++;
   }
-  body.children.addAll(nodes);
+  final consent=nodes.indexWhere((n)=>n is XmlElement && n.findAllElements('wp:docPr').any((p)=>p.getAttribute('name')=='ISO ENTEGRE LOGO'));
+  if(consent<0) throw const FormatException('Onay sayfası şablonda bulunamadı.');
+  body.children.addAll(nodes.take(consent));
+  body.children.addAll(footer.map((p)=>p.copy()));
+  body.children.add(pageBreak());
+  body.children.addAll(nodes.skip(consent));
  }
  if(section!=null) body.children.add(section);
  // Explicit complex-script sizes avoid LibreOffice/Word font-substitution
@@ -131,7 +165,8 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
    cs.setAttribute('w:val',size.getAttribute('w:val'));
   }
  }
- return _rewrite(template,{'word/document.xml':utf8.encode(doc.toXmlString())});
+ return _rewrite(template,{'word/document.xml':utf8.encode(doc.toXmlString()),
+  'word/_rels/document.xml.rels':utf8.encode(relationships.toXmlString())});
 }
 
 /// Edit values directly in the existing OOXML cells so workbook drawings,
