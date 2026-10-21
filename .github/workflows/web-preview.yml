@@ -1,0 +1,22 @@
+name: Flutter Web Preview
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/web-preview"]
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - run: flutter test
+      - run: flutter test --platform chrome test/web_preview_test.dart
+      - run: flutter build web --release --no-web-resources-cdn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gozen-boarding-pro-web
+          path: build/web

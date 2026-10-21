@@ -16,11 +16,15 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 import 'boarding_validation.dart';
 import 'boarding_repository.dart';
+import 'firebase_options.dart';
+import 'ocr_adapter.dart';
+import 'web_preview.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
@@ -29,10 +33,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:intl/intl.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
@@ -263,7 +264,7 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations(const [
     DeviceOrientation.portraitUp,
   ]);
-  await Firebase.initializeApp();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const GozenBoardingApp());
 }
 
@@ -298,7 +299,9 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       theme: _AppTheme.light(),
       darkTheme: _AppTheme.dark(),
       builder: (context, child) => _GlobalBackdrop(child: child ?? const SizedBox.shrink()),
-      home: AuthGate(
+      home: kIsWeb ? WebPreviewScreen(liveBuilder: (_) => AuthGate(
+        onThemeChanged: setThemeMode, themeMode: _themeMode,
+      )) : AuthGate(
         onThemeChanged: setThemeMode,
         themeMode: _themeMode,
       ),
@@ -591,7 +594,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 width: 18,
                                 child: CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : const Text('Giriş / Kayıt'),
+                            : const Text('Yetkili Giriş'),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -603,7 +606,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(.45),
                       ),
                       child: const Text(
-                        'Not: Demo akışta kullanıcı yoksa otomatik kayıt olur.',
+                        'Giriş için yönetici tarafından onaylanmış bir hesap gereklidir.',
                         style: TextStyle(fontSize: 12),
                       ),
                     ),
@@ -1941,8 +1944,7 @@ class _ScanTabState extends State<ScanTab> {
 
   final _manualScan = TextEditingController();
   bool _ocrAssistEnabled = false;
-  final ImagePicker _imagePicker = ImagePicker();
-  final TextRecognizer _ocrTextRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+  final OcrAdapter _ocr = OcrAdapter();
   bool _busy = false;
 
   // Camera scanner (MobileScanner)
@@ -2322,13 +2324,10 @@ class _ScanTabState extends State<ScanTab> {
   Future<void> _runOcrAssistScan() async {
     final flightSnap = await widget.flightRef.get();
     final expectedFlightCode = _normalizeFlightCode((flightSnap.data()?['flightCode'] ?? '').toString());
-    final picked = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 92, preferredCameraDevice: CameraDevice.rear);
-    if (picked == null) return;
     setState(() => _busy = true);
     try {
-      final input = InputImage.fromFilePath(picked.path);
-      final recognized = await _ocrTextRecognizer.processImage(input);
-      final allText = recognized.text;
+      final allText = await _ocr.captureText();
+      if (allText == null) return;
       if (allText.trim().isEmpty) {
         throw Exception('OCR metin okuyamadı. Lütfen tekrar dene veya manuel form kullan.');
       }
@@ -2829,7 +2828,7 @@ class _ScanTabState extends State<ScanTab> {
     _tabs?.removeListener(_tabChanged);
     _lastCamRaw = null;
     _manualScan.dispose();
-    _ocrTextRecognizer.close();
+    _ocr.close();
     _scannerController.dispose();
     super.dispose();
   }
@@ -2999,7 +2998,7 @@ class _ScanTabState extends State<ScanTab> {
                                 title: const Text('Görsel Rehber Çerçevesi'),
                                 subtitle: const Text('OCR değil; barkod ve kart hizalama yardımı.'),
                               ),
-                              SwitchListTile(
+                              if (!kIsWeb) SwitchListTile(
                                 value: _ocrAssistEnabled,
                                 onChanged: isClosed ? null : (v) => setState(() => _ocrAssistEnabled = v),
                                 title: const Text('OCR Yardımı (Kamera metin okuma)'),
@@ -3961,7 +3960,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
     return '';
   }
 
-  Future<File> _buildCsvFile() async {
+  Future<XFile> _buildCsvFile() async {
     final flightSnap = await widget.flightRef.get();
     final flight = flightSnap.data() ?? {};
     final flightCode = (flight['flightCode'] ?? 'FLIGHT').toString();
@@ -4002,17 +4001,16 @@ class _OpTimesTabState extends State<OpTimesTab> {
     }
 
     final csv = const ListToCsvConverter().convert(rows);
-    final dir = await getTemporaryDirectory();
     final safeCode = flightCode.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    final file = File('${dir.path}/GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
-    await file.writeAsString('\uFEFF$csv', encoding: utf8);
-    return file;
+    return XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
+      mimeType: 'text/csv',
+      name: 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
   }
 
   Future<void> _shareFinalReportAndCloseScreen() async {
     final file = await _buildCsvFile();
-    await _log('REPORT_EXPORTED_AUTO_ON_OPERATION_FINISHED', meta: {'path': file.path});
-    await Share.shareXFiles([XFile(file.path)], text: 'GOZEN Boarding Final Report');
+    await _log('REPORT_EXPORTED_AUTO_ON_OPERATION_FINISHED', meta: {'filename': file.name});
+    await Share.shareXFiles([file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Final Report');
     if (!mounted) return;
     Navigator.of(context).pop(); // return to flight list (closed flights tab available)
   }
@@ -4235,7 +4233,7 @@ class _ReportTabState extends State<ReportTab> {
     });
   }
 
-  Future<File> _buildCsvFile() async {
+  Future<XFile> _buildCsvFile() async {
     final flightSnap = await widget.flightRef.get();
     final flightCode = (flightSnap.data()?['flightCode'] ?? 'FLIGHT').toString();
 
@@ -4282,11 +4280,10 @@ class _ReportTabState extends State<ReportTab> {
 
     final csv = const ListToCsvConverter().convert(rows);
 
-    final dir = await getTemporaryDirectory();
     final safeCode = flightCode.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    final file = File('${dir.path}/GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
-    await file.writeAsString('\uFEFF$csv', encoding: utf8); // BOM for Excel
-    return file;
+    return XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
+      mimeType: 'text/csv',
+      name: 'GOZEN_${safeCode}_${DateTime.now().millisecondsSinceEpoch}.csv');
   }
 
   @override
@@ -4318,8 +4315,8 @@ class _ReportTabState extends State<ReportTab> {
                           setState(() => _busy = true);
                           try {
                             final file = await _buildCsvFile();
-                            await _log('REPORT_EXPORTED', meta: {'path': file.path});
-                            await Share.shareXFiles([XFile(file.path)], text: 'GOZEN Boarding Report');
+                            await _log('REPORT_EXPORTED', meta: {'filename': file.name});
+                            await Share.shareXFiles([file], fileNameOverrides: [file.name], text: 'GOZEN Boarding Report');
                           } catch (e) {
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
