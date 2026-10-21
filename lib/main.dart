@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -31,6 +32,16 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
+Map<String, dynamic> _privacySafeLogMeta(Map<String, dynamic>? input, String etdDate) {
+  final sanitized = Map<String, dynamic>.from(input ?? const <String, dynamic>{});
+  sanitized.removeWhere((key, _) {
+    final lower = key.toLowerCase();
+    return lower.contains('raw') || lower.contains('barcode') || lower.contains('payload');
+  });
+  sanitized['etdDate'] = etdDate;
+  return sanitized;
+}
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
@@ -472,23 +483,11 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception('Kullanıcı adı (email) ve şifre zorunlu.');
       }
 
-      UserCredential cred;
-      try {
-        cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
-          email: email,
-          password: pass,
-        );
-      } on FirebaseAuthException catch (e) {
-        // If user not found, auto-register (simple flow).
-        if (e.code == 'user-not-found') {
-          cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-            email: email,
-            password: pass,
-          );
-        } else {
-          rethrow;
-        }
-      }
+      // Only pre-provisioned accounts can log in.
+      final UserCredential cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email,
+        password: pass,
+      );
 
       // Create user profile if missing.
       final uid = cred.user!.uid;
@@ -752,14 +751,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return snap.data() ?? {};
   }
 
-  Future<void> _setRole(String role) async {
-    setState(() => _busy = true);
-    try {
-      await Db.userDoc(widget.uid).set({'role': role}, SetOptions(merge: true));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -791,7 +782,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       DropdownMenuItem(
                           value: 'Supervisor', child: Text('Supervisor')),
                     ],
-                    onChanged: _busy ? null : (v) => _setRole(v ?? 'Agent'),
+                    onChanged: null, // Role is read-only; assigned by administrator.
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -1331,7 +1322,12 @@ class _MergedAgentFlights extends StatelessWidget {
       stream: q.snapshots(),
       builder: (context, snap) {
         final all = snap.data?.docs ?? [];
-        final openDocs = all.where((d) => (d.data()['closed'] ?? false) != true).toList();
+        final openDocs = all.where((d) {
+          final data = d.data();
+          return (data['closed'] ?? false) != true &&
+              ((data['ownerUid'] ?? '') == uid ||
+               List<String>.from(data['participants'] ?? const <String>[]).contains(uid));
+        }).toList();
         final closedDocs = all.where((d) {
           final data = d.data();
           if (!_isFlightClosedVisible(data)) return false;
@@ -1752,7 +1748,6 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
     final owner = (data['ownerUid'] ?? '').toString();
     final isClosed = (data['closed'] ?? false) == true;
 
-    if (widget.forceAllow) return _Access(allowed: true, reason: null);
     if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
 
     final me = await Db.userDoc(widget.currentUid).get();
@@ -1772,8 +1767,10 @@ class _FlightDetailScreenState extends State<FlightDetailScreen> {
       return _Access(allowed: true, reason: null);
     }
 
-    // Open flights are visible to all signed-in users. Write permissions are restricted inside each tab.
-    return _Access(allowed: true, reason: null);
+    if (role == 'Supervisor' || role == 'Admin') return _Access(allowed: true, reason: null);
+    final participants = List<String>.from(data['participants'] ?? const <String>[]);
+    if (participants.contains(widget.currentUid)) return _Access(allowed: true, reason: null);
+    return _Access(allowed: false, reason: 'Bu uçuş için kabul edilmiş davet yok.');
   }
 
   @override
@@ -2076,7 +2073,7 @@ class _ScanTabState extends State<ScanTab> {
     // Remove everything except letters/digits.
     final cleaned = s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
     // Accept 1-3 alnum prefix + 1-5 digits + optional suffix letter.
-    final m = RegExp(r'^([A-Z0-9]{1,3})(0*)([0-9]{1,5})([A-Z]?)$').firstMatch(cleaned);
+    final m = RegExp(r'^([A-Z]{2,3}|[A-Z][0-9])(0*)([0-9]{1,5})([A-Z]?)$').firstMatch(cleaned);
     if (m == null) return cleaned;
 
     final prefix = m.group(1)!;
@@ -2098,7 +2095,7 @@ Set<String> _flightCodeAlternatives(String code) {
     final n = _normalizeFlightCode(code);
     if (n.isEmpty) return <String>{};
 
-    final m = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})([A-Z]?)$').firstMatch(n);
+    final m = RegExp(r'^([A-Z]{2,3}|[A-Z][0-9])([0-9]{1,5})([A-Z]?)$').firstMatch(n);
     if (m == null) return <String>{n};
 
     final pref = m.group(1)!;
@@ -2130,53 +2127,12 @@ Set<String> _flightCodeAlternatives(String code) {
 
 
   bool _flightCodeMatches(String expected, String scanned) {
-    final expNorm = _normalizeFlightCode(expected);
-    final gotNorm = _normalizeFlightCode(scanned);
-
-    if (expNorm.isEmpty || gotNorm.isEmpty) return false;
-
-    // Fast path: same alternatives (IATA/ICAO normalization + leading zero stripping).
-    final a = _flightCodeAlternatives(expNorm);
-    final b = _flightCodeAlternatives(gotNorm);
-    if (a.intersection(b).isNotEmpty) return true;
-
-    // Heuristic: camera sometimes returns only digits (e.g. "00185") or misses trailing "0".
-    final expPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(expNorm) ?? '';
-    final expDigits = expNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
-    final gotPrefix = RegExp(r'^[A-Z]{1,3}').stringMatch(gotNorm) ?? '';
-    final gotDigits = gotNorm.replaceFirst(RegExp(r'^[A-Z]{1,3}'), '').replaceAll(RegExp(r'[^0-9]'), '');
-
-    // If scanned has no carrier letters, compare digits only.
-    if (gotPrefix.isEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
-      if (gotDigits == expDigits) return true;
-      // Allow missing trailing zero (very common on some PDF417 reads).
-      if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
-      // Allow scanned with leading zeros.
-      final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
-      if (gotNoLead == expDigits) return true;
-      if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
-      // Allow partial prefix match: 185 vs 1850
-      if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
-    }
-
-    // If scanned has a carrier but digits are truncated, allow close match for same carrier family.
-    if (gotPrefix.isNotEmpty && expPrefix.isNotEmpty && gotDigits.isNotEmpty && expDigits.isNotEmpty) {
-      // Carrier equivalence via alternatives
-      final expCarriers = a.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
-      final gotCarriers = b.map((e) => RegExp(r'^[A-Z]{1,3}').stringMatch(e) ?? '').where((e) => e.isNotEmpty).toSet();
-      final carrierOk = expCarriers.intersection(gotCarriers).isNotEmpty;
-      if (carrierOk) {
-        if (expDigits.endsWith('0') && gotDigits == expDigits.substring(0, expDigits.length - 1)) return true;
-        final gotNoLead = gotDigits.replaceFirst(RegExp(r'^0+'), '');
-        if (expDigits.endsWith('0') && gotNoLead == expDigits.substring(0, expDigits.length - 1)) return true;
-        if (expDigits.startsWith(gotNoLead) && expDigits.length - gotNoLead.length == 1 && expDigits.endsWith('0')) return true;
-      }
-    }
-
-    return false;
+    final e = _normalizeFlightCode(expected);
+    final g = _normalizeFlightCode(scanned);
+    final valid = RegExp(r'^(?:[A-Z]{2,3}|[A-Z][0-9])[0-9]{1,5}$');
+    if (!valid.hasMatch(e) || !valid.hasMatch(g)) return false;
+    return _flightCodeAlternatives(e).intersection(_flightCodeAlternatives(g)).isNotEmpty;
   }
-
-
 
   String? _sanitizeSeat(String? input) {
     final v = (input ?? '').toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
@@ -2293,7 +2249,7 @@ Set<String> _flightCodeAlternatives(String code) {
     }
 
     final up = rFixed.toUpperCase();
-    if (up.length >= 40 && (up.startsWith('M') || up.startsWith('S'))) {
+    if (up.length >= 60 && RegExp(r'^[MS][1-9]').hasMatch(up)) {
       try {
         final nameRaw = up.length >= 22 ? up.substring(2, 22).trim() : '';
         final pnrRaw = up.length >= 30 ? up.substring(23, 30).trim() : '';
@@ -2431,37 +2387,6 @@ Set<String> _flightCodeAlternatives(String code) {
       }
     }
 
-    // Expected-flight recovery heuristic (helps noisy PDF417 reads like LS00185 vs LS1850)
-    if (best.isNotEmpty && expected.isNotEmpty && !_flightCodeMatches(expected, best)) {
-      final exp = _normalizeFlightCode(expected);
-      final reCode = RegExp(r'^([A-Z0-9]{1,3})([0-9]{1,5})$');
-      final me = reCode.firstMatch(exp);
-      final mb = reCode.firstMatch(best);
-      if (me != null && mb != null) {
-        final expCarrier = me.group(1) ?? '';
-        final expNum = me.group(2) ?? '';
-        final gotCarrier = mb.group(1) ?? '';
-        final gotNumRaw = mb.group(2) ?? '';
-        final gotNum = gotNumRaw.replaceFirst(RegExp(r'^0+'), '');
-        if (expCarrier == gotCarrier || _flightCodeMatches(expCarrier, gotCarrier)) {
-          final expNumNo0 = expNum.replaceFirst(RegExp(r'^0+'), '');
-          final prefixClose =
-              (expNum.startsWith(gotNum) || expNumNo0.startsWith(gotNum)) &&
-              (expNum.length - gotNum.length).abs() <= 1 &&
-              gotNum.length >= 3;
-          final suffixClose =
-              (gotNum.endsWith(expNum) || gotNum.endsWith(expNumNo0)) &&
-              (gotNum.length - expNum.length).abs() <= 1 &&
-              expNum.length >= 3;
-          final distClose = _levenshtein(expNum, gotNum.padLeft(expNum.length, '0')) <= 1 ||
-              _levenshtein(expNum, gotNum) <= 1;
-          if (prefixClose || suffixClose || distClose) {
-            return exp;
-          }
-        }
-      }
-    }
-
     if (best.isNotEmpty) return best;
 
     final cleaned = up.replaceAll(RegExp(r'[^A-Z0-9]'), ' ');
@@ -2518,7 +2443,7 @@ Set<String> _flightCodeAlternatives(String code) {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -2970,6 +2895,32 @@ Set<String> _flightCodeAlternatives(String code) {
 
   // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw, {bool manualEntry = false}) async {
+    // Decode and verify mandatory IATA BCBP leg before displaying boarding decision.
+    final fixedRaw = _sanitizeScanRawPreserve(raw).toUpperCase();
+    if (!manualEntry && RegExp(r'^[MS][1-9]').hasMatch(fixedRaw)) {
+      if (fixedRaw.length < 60) throw Exception('BCBP barkodu eksik; boarding engellendi.');
+      final origin = fixedRaw.substring(30, 33);
+      final julian = int.tryParse(fixedRaw.substring(44, 47));
+      final currentFlight = await widget.flightRef.get();
+      final dateValue = currentFlight.data()?['etdDate'];
+      if (origin != 'DLM') {
+        await _alertVibrate(3);
+        if (mounted) await _showResultScreen(bg: Colors.deepPurple,
+          title: 'WRONG DEPARTURE', subtitle: 'Beklenen: DLM • Okunan: $origin');
+        return;
+      }
+      if (dateValue is! Timestamp || julian == null || julian < 1 || julian > 366) {
+        throw Exception('BCBP uçuş tarihi doğrulanamadı; boarding engellendi.');
+      }
+      final flightDate = dateValue.toDate();
+      final expectedDay = flightDate.difference(DateTime(flightDate.year, 1, 1)).inDays + 1;
+      if (julian != expectedDay) {
+        await _alertVibrate(3);
+        if (mounted) await _showResultScreen(bg: Colors.deepPurple,
+          title: 'WRONG FLIGHT DATE', subtitle: 'Beklenen gün: $expectedDay • Okunan: $julian');
+        return;
+      }
+    }
     final fSnap0 = await widget.flightRef.get();
     if ((fSnap0.data()?['closed'] ?? false) == true) {
       throw Exception('Uçuş kapatılmış. Scan devre dışı.');
@@ -4150,7 +4101,7 @@ class _PaxListTabState extends State<PaxListTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -4344,7 +4295,7 @@ class WatchlistTab extends StatelessWidget {
       'byUid': currentUid,
       'byEmail': await _emailOf(currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -4841,7 +4792,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -5128,7 +5079,7 @@ class _ReportTabState extends State<ReportTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
