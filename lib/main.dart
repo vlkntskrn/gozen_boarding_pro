@@ -19,16 +19,6 @@ import 'dart:convert';
 import 'dart:io';
 
 
-Map<String, dynamic> _privacySafeLogMeta(Map<String, dynamic>? input, String etdDate) {
-  final sanitized = Map<String, dynamic>.from(input ?? const <String, dynamic>{});
-  sanitized.removeWhere((key, _) {
-    final lower = key.toLowerCase();
-    return lower.contains('raw') || lower.contains('barcode') || lower.contains('payload');
-  });
-  sanitized['etdDate'] = etdDate;
-  return sanitized;
-}
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -42,6 +32,16 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
+Map<String, dynamic> _privacySafeLogMeta(Map<String, dynamic>? input, String etdDate) {
+  final sanitized = Map<String, dynamic>.from(input ?? const <String, dynamic>{});
+  sanitized.removeWhere((key, _) {
+    final lower = key.toLowerCase();
+    return lower.contains('raw') || lower.contains('barcode') || lower.contains('payload');
+  });
+  sanitized['etdDate'] = etdDate;
+  return sanitized;
+}
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
