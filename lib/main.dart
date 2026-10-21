@@ -2422,7 +2422,7 @@ class _ScanTabState extends State<ScanTab> {
             const SizedBox(height: 24),
             FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
           ]),
-        )))),
+        ))),
       )),
     );
   }
@@ -2511,7 +2511,7 @@ class _ScanTabState extends State<ScanTab> {
     // Same seat already boarded. If same passenger => duplicate. Otherwise ask infant flow.
     final sameName = boarded.where((d) {
       final n = (d.data()['fullName'] ?? '').toString().trim().toUpperCase();
-      return n == fullName.trim().toUpperCase();
+      return watchlistMatches(n, fullName);
     }).toList();
 
     final hit = (sameName.isNotEmpty ? sameName.first : boarded.first);

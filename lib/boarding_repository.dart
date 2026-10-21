@@ -49,16 +49,8 @@ class BoardingRepository {
       RegExp(r'[^A-Z]'),
       '',
     );
-    final same = seatDocs.docs
-        .where(
-          (d) =>
-              (d.data()['fullName'] ?? '').toString().toUpperCase().replaceAll(
-                RegExp(r'[^A-Z]'),
-                '',
-              ) ==
-              nameKey,
-        )
-        .toList();
+    final same = seatDocs.docs.where((d) => watchlistMatches(pass.fullName,
+      (d.data()['fullName'] ?? '').toString())).toList();
     if (same.length > 1)
       throw Exception(
         'Birden çok eski yolcu kaydı var; yönetici incelemesi gerekli.',
@@ -113,6 +105,7 @@ class BoardingRepository {
       final now = FieldValue.serverTimestamp();
       tx.set(paxRef, {
         'fullName': pass.fullName,
+        'surname': pass.surname, 'givenName': pass.givenName, 'title': pass.title,
         'seat': pass.seat,
         'pnr': pass.pnr,
         'sequence': pass.sequence,

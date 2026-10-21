@@ -59,6 +59,12 @@ service cloud.firestore {
                pid == getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds[1])) &&
             pid in getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds;
         }
+        function noActiveInfant() {
+          let lock = get(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(resource.data.get('seatLock', 'legacy'))).data;
+          return resource.data.get('seatLock', '') == '' || resource.data.get('adultPaxId', null) != null ||
+            lock.paxIds.size() < 2 || lock.paxIds[0] != pid ||
+            getAfter(/databases/$(database)/documents/flights/$(fid)/pax/$(lock.paxIds[1])).data.status == 'OFFLOADED';
+        }
         allow read: if member(flight(fid));
         allow create: if
           (manager(getAfter(/databases/$(database)/documents/flights/$(fid)).data) && request.resource.data.status == 'NONE') ||
@@ -66,7 +72,7 @@ service cloud.firestore {
         allow update: if writable(fid) &&
           (!(resource.data.status in ['PREBOARDED', 'DFT_BOARDED']) && validBoarding() ||
            (resource.data.status in ['PREBOARDED', 'DFT_BOARDED'] &&
-            request.resource.data.status == 'OFFLOADED' &&
+            request.resource.data.status == 'OFFLOADED' && noActiveInfant() &&
             request.resource.data.offloadedByUid == request.auth.uid &&
             request.resource.data.offloadedAt == request.time &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','offloadedAt','offloadedByUid','offloadedByEmail'])));

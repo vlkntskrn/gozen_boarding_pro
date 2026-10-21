@@ -120,3 +120,23 @@ test('offload releases locks atomically and allows audited reboarding', async ()
   await assertSucceeds(b.commit());
   await assertSucceeds(boardBatch(f).commit());
 });
+
+function infantBatch(f, parent) {
+  const b=writeBatch(f);
+  b.set(doc(f,'flights/f1/pax/p2'),{fullName:'SMITH/BABY',seat:'1A',status:'DFT_BOARDED',adultPaxId:parent,boardedByUid:'agent',boardedAt:serverTimestamp(),validationDate:'2026-10-21',validationOrigin:'DLM',validationFlightCode:'LS1730',watchlistMatch:false,boardingKey:'k2',seatLock:'1A'});
+  b.set(doc(f,'flights/f1/boarding_keys/k2'),{active:true,paxId:'p2',byUid:'agent',at:serverTimestamp()});
+  b.set(doc(f,'flights/f1/seat_locks/1A'),{paxIds:['p1','p2'],byUid:'agent',at:serverTimestamp()});
+  return b;
+}
+test('second passenger on a seat requires explicit adult link', async () => {
+  const f=db('agent'); await assertSucceeds(boardBatch(f).commit());
+  await assertFails(infantBatch(f,null).commit());
+  await assertSucceeds(infantBatch(f,'p1').commit());
+});
+test('adult offload is denied while linked infant remains boarded', async () => {
+  const f=db('agent'); await assertSucceeds(boardBatch(f).commit());
+  await assertSucceeds(infantBatch(f,'p1').commit());
+  await assertFails(updateDoc(doc(f,'flights/f1/pax/p1'),{status:'OFFLOADED',offloadedByUid:'agent',offloadedAt:serverTimestamp()}));
+  await assertSucceeds(updateDoc(doc(f,'flights/f1/pax/p2'),{status:'OFFLOADED',offloadedByUid:'agent',offloadedAt:serverTimestamp()}));
+  await assertSucceeds(updateDoc(doc(f,'flights/f1/pax/p1'),{status:'OFFLOADED',offloadedByUid:'agent',offloadedAt:serverTimestamp()}));
+});
