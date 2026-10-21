@@ -42,6 +42,22 @@ void _wordText(XmlElement e,String value) {
   p.children.add(XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('t','w'),[],[XmlText(value)])]));
  }
 }
+void _wordColumns(XmlElement p,String left,String right) {
+ final props=p.findElements('w:pPr').firstOrNull;
+ final runProps=p.findElements('w:r').firstOrNull?.findElements('w:rPr').firstOrNull?.copy();
+ p.children.clear();
+ final pp=props?.copy() ?? XmlElement(XmlName('pPr','w'));
+ pp.children.removeWhere((n)=>n is XmlElement && ['tabs','jc'].contains(n.name.local));
+ pp.children.add(XmlElement(XmlName('tabs','w'),[],[XmlElement(XmlName('tab','w'),[
+  XmlAttribute(XmlName('val','w'),'left'),XmlAttribute(XmlName('pos','w'),'5500')])]));
+ p.children.add(pp);
+ for(var i=0;i<2;i++) {
+  final value=i==0?left:right;
+  if(i==1) p.children.add(XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('tab','w'))]));
+  p.children.add(XmlElement(XmlName('r','w'),[],[if(runProps!=null)runProps.copy(),
+   XmlElement(XmlName('t','w'),[XmlAttribute(XmlName('space','xml'),'preserve')],[XmlText(value)])]));
+ }
+}
 
 /// Preserve the uploaded Word template, including all consent translations and
 /// blank signature fields. Fifteen passengers per copy of the full form.
@@ -70,6 +86,8 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
    final rows=table.findElements('w:tr').skip(1).toList();
    for(var i=0;i<rows.length;i++) {
     final cells=rows[i].findElements('w:tc').toList(), index=page*15+i;
+    // Converted legacy form otherwise lets the last signature line spill.
+    for(final height in rows[i].findAllElements('w:trHeight')) {height.setAttribute('w:val','420');}
     if(cells.length!=6) throw const FormatException('Arama formu şablonu değişmiş.');
     final p=index<searched.length?searched[index]:null;
     final values=p==null?['${index+1})','','','','','']:[
@@ -85,11 +103,21 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
    final text=n.findAllElements('w:t').map((t)=>t.innerText).join();
    if(!text.startsWith('ADI-SOYADI')) continue;
    final pair=signatory==0?['searchTl','airlineRep']:signatory==1?['agent1','agent2']:['agent3','agent4'];
-   _wordText(n,'ADI-SOYADI: ${fields[pair[0]]??''}                       ADI-SOYADI: ${fields[pair[1]]??''}');signatory++;
+   _wordColumns(n,'ADI-SOYADI: ${fields[pair[0]]??''}','ADI-SOYADI: ${fields[pair[1]]??''}');signatory++;
   }
   body.children.addAll(nodes);
  }
  if(section!=null) body.children.add(section);
+ // Explicit complex-script sizes avoid LibreOffice/Word font-substitution
+ // expanding the supplied multilingual consent page into a third page.
+ for(final r in body.findAllElements('w:rPr')) {
+  final size=r.findElements('w:sz').firstOrNull;
+  if(size!=null) {
+   var cs=r.findElements('w:szCs').firstOrNull;
+   if(cs==null) {cs=XmlElement(XmlName('szCs','w'));r.children.add(cs);}
+   cs.setAttribute('w:val',size.getAttribute('w:val'));
+  }
+ }
  return _rewrite(template,{'word/document.xml':utf8.encode(doc.toXmlString())});
 }
 
@@ -114,8 +142,12 @@ List<int> dailyForm(List<int> template,FlightSpec spec,Map<String,dynamic> data)
  final ba=spec.reportForm=='OPR-FRM-0012';
  if(!ba) {
   final times=Map<String,dynamic>.from(data['times']??{});
-  if((fields['L6']??'').toString().isEmpty) fields['L6']=times['boardingStarted']??'';
-  if((fields['L7']??'').toString().isEmpty) fields['L7']=times['lastPassenger']??'';
+  String time(dynamic value) {
+   final d=DateTime.tryParse('$value');
+   return d==null?'':'${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
+  }
+  if((fields['L6']??'').toString().isEmpty) fields['L6']=time(times['boardingStarted']);
+  if((fields['L7']??'').toString().isEmpty) fields['L7']=time(times['lastPassenger']);
  }
  for(final key in (ba?baFields:dailyFields).keys) {put(key,(fields[key]??'').toString());}
  put(ba?'E12':'G8',spec.code);put(ba?'L12':'P3',spec.date);

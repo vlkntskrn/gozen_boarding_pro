@@ -46,6 +46,8 @@ Uçuş kodu/alias, gün, kalkış ve varış birlikte kesin eşleşir. Eksik var
 edilmez. Sabit alanlı BCBP yapısı korunur. Çok segmentli kartta tek bir eşleşen
 segment bulunmalıdır. Manuel girişte aynı kontroller çalışır. Infant, dolu
 koltuktaki yetişkine açık onayla bağlanır; yetişkin offload'unda infant da düşer.
+Standart zorunlu BCBP alanı yıl değil yılın gününü taşır. Uçuş tarihi yılı sağlar;
+aynı Julian günlü eski yıl kartını ayırt etmek için havayolu/DCS doğrulaması gerekir.
 
 LP yükleme biçimi eklenen Jet2 Word belgesidir: Flight Number / Flight Date &
 Time başlıkları ve 7 kolonlu tablo. Uçuş/güzergah/gün uyuşmazlığı veya bozuk

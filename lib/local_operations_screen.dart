@@ -267,7 +267,7 @@ class _LocalOperationsScreenState extends State<LocalOperationsScreen> {
       Wrap(spacing:8,children:[TextButton(onPressed:()=>setState(()=>camera=!camera),child:Text(camera?'Kamerayı kapat':'Kamerayı aç')),
        TextButton(onPressed:camera?()=>run(()=>scanner.toggleTorch()):null,child:const Text('Fener'))]),
       TextField(controller:raw,maxLines:3,decoration:const InputDecoration(labelText:'BCBP metni (boşlukları koru)')),
-      SwitchListTile(title:const Text('DFT Random'),value:random,onChanged:(v)=>setState(()=>random=v)),
+      SwitchListTile(title:const Text('DFT Random'),subtitle:const Text('Yalnız arama tamamlandıysa etkinleştirin.'),value:random,onChanged:(v)=>setState(()=>random=v)),
       FilledButton(onPressed:busy||l.closed?null:()=>run(()=>scan(raw.text)),child:const Text('Kartı Doğrula')),
       TextButton(onPressed:busy||l.closed?null:()=>run(manual),child:const Text('Güvenli manuel giriş')),
       if(!kIsWeb) TextButton(onPressed:busy||l.closed?null:()=>run(ocrAssist),child:const Text('OCR destekli manuel doğrulama')),

@@ -54,6 +54,10 @@ void main(){
  });
  test('forms preserve supplied templates, names LP and no signatures',()async{
   final l=LocalFlight(spec,'agent',(s)async{});await l.importLp(zipXml(lpXml()));await l.board(pass(),random:true);
+  await l.searchDetails(l.passengers.single['id'],'GBR','TEST SEARCH / LP');
+  await l.saveFields({'searchTl':'TEST TEAM LEADER','airlineRep':'TEST AIRLINE REPRESENTATIVE',
+   'agent1':'TEST AGENT ONE','agent2':'TEST AGENT TWO','agent3':'TEST AGENT THREE','agent4':'TEST AGENT FOUR',
+   'staff':'TEST SECURITY ONE | RAMP','G9':'B737','E13':'A320','G18':'TEST OPERATION','L24':'TEST BA OPERATION'});
   final word=searchForm(File('assets/forms/search.docx').readAsBytesSync(),spec,l.snapshot);
   final xml=utf8.decode(ZipDecoder().decodeBytes(word).findFile('word/document.xml')!.content as List<int>);
   expect(xml,contains('SMITH/JOHN LP'));expect(xml,contains('Passenger'));
