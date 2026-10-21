@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 42590)
-Total output lines: 4615
-
 
 // GOZEN BOARDING PRO (Flutter) - main.dart
 // Platform: Android + iOS
@@ -1416,7 +1413,1845 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
     super.dispose();
   }
 
-  bool _isValidFli…18590 tokens truncated…ARDED';
+  bool _isValidFlightCode(String v) => normalizeFlightCode(v).isNotEmpty;
+
+  Future<void> _addPaxDialog() async {
+    final name = TextEditingController();
+    final seat = TextEditingController();
+    final pnr = TextEditingController();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Yolcu Ekle'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: 'İsim Soyisim')),
+              TextField(controller: seat, decoration: const InputDecoration(labelText: 'Seat')),
+              TextField(controller: pnr, decoration: const InputDecoration(labelText: 'PNR (opsiyonel)')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
+          ],
+        );
+      },
+    );
+
+    if (ok == true) {
+      setState(() {
+        _paxDrafts.add(_PaxDraft(
+          fullName: name.text.trim(),
+          seat: seat.text.trim(),
+          pnr: pnr.text.trim(),
+        ));
+      });
+    }
+  }
+
+  Future<void> _addWatchlistDialog() async {
+    final c = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('WatchList Yolcu Ekle'),
+        content: TextField(
+          controller: c,
+          decoration: const InputDecoration(labelText: 'İsim Soyisim'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Ekle')),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      final name = c.text.trim();
+      if (name.isNotEmpty) {
+        setState(() => _watchlistNames.add(name));
+      }
+    }
+  }
+
+  Future<void> _create() async {
+    setState(() {
+      _busy = true;
+      _err = null;
+    });
+
+    try {
+      final code = normalizeFlightCode(_flightCode.text);
+      if (!_isValidFlightCode(code)) {
+        throw Exception('Uçuş kodu formatı hatalı. Örn: LS976 / BA2245');
+      }
+
+      final booked = int.tryParse(_bookedPax.text.trim()) ?? 0;
+      if (_etdDate == null) {
+        throw Exception('Lütfen uçuşun ETD tarihini seçin.');
+      }
+
+      final flightRef = Db.flights().doc();
+      final now = FieldValue.serverTimestamp();
+
+      await Db.fs.runTransaction((tx) async {
+        tx.set(flightRef, {
+          'flightCode': code,
+          'departureAirport': 'DLM',
+          'bookedPax': booked,
+          'ownerUid': widget.uid,
+          'participants': <String>[],
+          'createdAt': now,
+          'offlineMode': false,
+          'nightMode': false,
+          'etdDate': Timestamp.fromDate(_etdDate!),
+          'etdDateText': DateFormat('yyyy-MM-dd').format(_etdDate!),
+          'opTimes': <String, dynamic>{},
+        });
+
+        // Create subcollections
+        final paxCol = flightRef.collection('pax');
+        for (final p in _paxDrafts) {
+          tx.set(paxCol.doc(), {
+            'fullName': p.fullName,
+            'seat': p.seat,
+            'pnr': p.pnr,
+            'status': 'NONE',
+            'boardedAt': null,
+            'boardedByUid': null,
+            'boardedByEmail': null,
+            'offloadedAt': null,
+            'offloadedByUid': null,
+            'offloadedByEmail': null,
+            'createdAt': now,
+          });
+        }
+
+        final wlCol = flightRef.collection('watchlist');
+        for (final n in _watchlistNames) {
+          tx.set(wlCol.doc(), {
+            'fullName': n,
+            'createdAt': now,
+          });
+        }
+
+        final logCol = flightRef.collection('logs');
+        tx.set(logCol.doc(), {
+          'type': 'FLIGHT_CREATED',
+          'byUid': widget.uid,
+          'at': now,
+          'meta': {'paxCount': _paxDrafts.length, 'watchlistCount': _watchlistNames.length, 'etdDate': DateFormat('yyyy-MM-dd').format(_etdDate!)},
+        });
+      });
+
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) setState(() => _err = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Uçuş Oluştur')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  TextField(
+                    controller: _flightCode,
+                    decoration: const InputDecoration(
+                      labelText: 'Uçuş Kodu (LS976 / BA2245)',
+                    ),
+                    textCapitalization: TextCapitalization.characters,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _bookedPax,
+                    decoration: const InputDecoration(labelText: 'Booked Pax'),
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.event),
+                    title: Text(_etdDate == null
+                        ? 'ETD Tarihi Seçilmedi'
+                        : 'ETD: ${DateFormat('yyyy-MM-dd').format(_etdDate!)}'),
+                    subtitle: const Text('Uçuşun ETD olarak gerçekleşeceği tarih baz alınmalıdır.'),
+                    trailing: FilledButton.tonal(
+                      onPressed: _pickEtdDate,
+                      child: const Text('Tarih Seç'),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _addWatchlistDialog,
+                          icon: const Icon(Icons.person_add),
+                          label: const Text('WatchList Veri Ekle'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _ChipsWrap(
+                    items: _watchlistNames,
+                    onRemove: (i) => setState(() => _watchlistNames.removeAt(i)),
+                  ),
+                  const Divider(height: 28),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.group_off_outlined),
+                    title: const Text('Yolcu Ekle kaldırıldı'),
+                    subtitle: const Text('Yolcu listesi scan/manüel boarding sırasında oluşur.'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_err != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                _err!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _busy ? null : _create,
+            icon: _busy
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save),
+            label: const Text('Uçuşu Kaydet'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PaxDraft {
+  final String fullName;
+  final String seat;
+  final String pnr;
+  _PaxDraft({required this.fullName, required this.seat, required this.pnr});
+}
+
+class _ChipsWrap extends StatelessWidget {
+  final List<String> items;
+  final void Function(int index) onRemove;
+
+  const _ChipsWrap({required this.items, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) {
+      return const Align(
+        alignment: Alignment.centerLeft,
+        child: Text('WatchList boş.'),
+      );
+    }
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (int i = 0; i < items.length; i++)
+          InputChip(
+            label: Text(items[i]),
+            onDeleted: () => onRemove(i),
+          )
+      ],
+    );
+  }
+}
+
+// ==========================
+// Flight Detail (7 tabs)
+// ==========================
+
+class FlightDetailScreen extends StatefulWidget {
+  final String flightId;
+  final String currentUid;
+  final bool forceAllow;
+
+  const FlightDetailScreen({
+    super.key,
+    required this.flightId,
+    required this.currentUid,
+    required this.forceAllow,
+  });
+
+  @override
+  State<FlightDetailScreen> createState() => _FlightDetailScreenState();
+}
+
+class _FlightDetailScreenState extends State<FlightDetailScreen> {
+  late final flightRef = Db.flights().doc(widget.flightId);
+
+  Future<_Access> _checkAccess() async {
+    final doc = await flightRef.get();
+    if (!doc.exists) return _Access(allowed: false, reason: 'Uçuş bulunamadı.');
+
+    final data = doc.data()!;
+    final owner = (data['ownerUid'] ?? '').toString();
+    final isClosed = (data['closed'] ?? false) == true;
+
+    if (owner == widget.currentUid) return _Access(allowed: true, reason: null);
+
+    final me = await Db.userDoc(widget.currentUid).get();
+    final role = _normalizeRoleValue(
+      me.data()?['role'],
+      email: (me.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString(),
+    );
+
+    if (isClosed) {
+      final canSeeClosed = role == 'Supervisor' || role == 'Admin';
+      if (!canSeeClosed) {
+        return _Access(
+          allowed: false,
+          reason: 'Bu uçuş kapatılmış. Kapatılmış uçuşlara sadece uçuş sahibi, Supervisor veya Admin erişebilir.',
+        );
+      }
+      return _Access(allowed: true, reason: null);
+    }
+
+    final participants = List<String>.from(data['participants'] ?? []);
+    return _Access(allowed: role == 'Admin' || role == 'Supervisor' || participants.contains(widget.currentUid),
+      reason: 'Bu uçuş için davet veya yönetici yetkisi gerekli.');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_Access>(
+      future: _checkAccess(),
+      builder: (context, snap) {
+        final a = snap.data;
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        if (a == null || !a.allowed) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('Uçuş')),
+            body: Center(child: Text(a?.reason ?? 'Erişim yok.')),
+          );
+        }
+
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: flightRef.snapshots(),
+          builder: (context, flightSnap) {
+            final f = flightSnap.data?.data();
+            final code = (f?['flightCode'] ?? '—').toString();
+
+            return DefaultTabController(
+              length: 7,
+              child: Scaffold(
+                appBar: AppBar(
+                  toolbarHeight: 86,
+                  titleSpacing: 12,
+                  title: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        'GOZEN BOARDING PRO',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Uçuş • $code',
+                        style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                      ),
+                    ],
+                  ),
+                  actions: const [
+                    Padding(
+                      padding: EdgeInsets.only(right: 12),
+                      child: Center(child: _FlightBadge(icon: Icons.verified_user_rounded, text: 'Crew Ops')),
+                    ),
+                  ],
+                  bottom: PreferredSize(
+                    preferredSize: const Size.fromHeight(58),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                      child: Container(
+                        height: 46,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          color: Theme.of(context).brightness == Brightness.dark
+                              ? Colors.white.withOpacity(0.05)
+                              : Colors.white.withOpacity(0.82),
+                          border: Border.all(
+                            color: Theme.of(context).brightness == Brightness.dark
+                                ? Colors.white.withOpacity(0.10)
+                                : Colors.white.withOpacity(0.90),
+                          ),
+                        ),
+                        child: const TabBar(
+                          isScrollable: true,
+                          dividerColor: Colors.transparent,
+                          tabAlignment: TabAlignment.start,
+                          indicatorSize: TabBarIndicatorSize.tab,
+                          indicator: BoxDecoration(
+                            borderRadius: BorderRadius.all(Radius.circular(12)),
+                            gradient: LinearGradient(
+                              colors: [_AppPalette.cyan, Color(0xFF8BE6FF)],
+                            ),
+                          ),
+                          labelColor: _AppPalette.midnight,
+                          labelStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                          tabs: [
+                            Tab(text: 'Scan'),
+                            Tab(text: 'Yolcu Listesi'),
+                            Tab(text: 'WatchList'),
+                            Tab(text: 'Personel'),
+                            Tab(text: 'Ekipman'),
+                            Tab(text: 'Op. Times'),
+                            Tab(text: 'Rapor'),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                body: Column(
+                  children: [
+                    _FlightOpsHeader(flightRef: flightRef, currentUid: widget.currentUid),
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          ScanTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          PaxListTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          WatchlistTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          StaffTab(flightRef: flightRef),
+                          EquipmentTab(flightRef: flightRef),
+                          OpTimesTab(flightRef: flightRef, currentUid: widget.currentUid),
+                          ReportTab(flightRef: flightRef, currentUid: widget.currentUid),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+
+class _FlightOpsHeader extends StatefulWidget {
+  final DocumentReference<Map<String, dynamic>> flightRef;
+  final String currentUid;
+  const _FlightOpsHeader({required this.flightRef, required this.currentUid});
+
+  @override
+  State<_FlightOpsHeader> createState() => _FlightOpsHeaderState();
+}
+
+class _FlightOpsHeaderState extends State<_FlightOpsHeader> {
+  Future<String> _emailOf(String uid) async {
+    final s = await Db.userDoc(uid).get();
+    return (s.data()?['email'] ?? '').toString();
+  }
+
+  Future<void> _logOffline(bool v) async {
+    await widget.flightRef.collection('logs').add({
+      'type': 'OFFLINE_MODE_TOGGLED',
+      'byUid': widget.currentUid,
+      'byEmail': await _emailOf(widget.currentUid),
+      'at': FieldValue.serverTimestamp(),
+      'meta': {'value': v, 'etdDate': ((await widget.flightRef.get()).data()?['etdDateText'] ?? '').toString()},
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: widget.flightRef.snapshots(),
+      builder: (context, snap) {
+        final data = snap.data?.data() ?? <String, dynamic>{};
+        final offline = (data['offlineMode'] ?? false) == true;
+        final etdText = (data['etdDateText'] ?? '').toString();
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: _GlassPanel(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_off, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    etdText.isEmpty ? 'Operasyon Ayarları' : 'Operasyon Ayarları • ETD $etdText',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                  ),
+                ),
+                const Text('Çevrimiçi gerekli', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 6),
+
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+
+class _Access {
+  final bool allowed;
+  final String? reason;
+  _Access({required this.allowed, required this.reason});
+}
+
+
+class _FlightBadge extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _FlightBadge({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: (dark ? Colors.white : _AppPalette.navy).withOpacity(dark ? 0.06 : 0.05),
+        border: Border.all(
+          color: (dark ? Colors.white : _AppPalette.navy).withOpacity(0.10),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: dark ? _AppPalette.cyan : _AppPalette.navy),
+          const SizedBox(width: 6),
+          Text(text, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
+// ==========================
+// Tab 1: Scan
+// ==========================
+
+class ScanTab extends StatefulWidget {
+  final DocumentReference<Map<String, dynamic>> flightRef;
+  final String currentUid;
+
+  const ScanTab({super.key, required this.flightRef, required this.currentUid});
+
+  @override
+  State<ScanTab> createState() => _ScanTabState();
+}
+
+class _ScanTabState extends State<ScanTab> {
+  bool _offline = false;
+
+  final _manualScan = TextEditingController();
+  bool _ocrAssistEnabled = false;
+  final OcrAdapter _ocr = OcrAdapter();
+  bool _busy = false;
+
+  // Camera scanner (MobileScanner)
+  bool _cameraOn = true;
+  bool _scanTabActive = true;
+  TabController? _tabs;
+  String? _lastParsedPreview;
+  DateTime? _lastCamHitAt;
+  String? _lastCamRaw;
+
+  late final MobileScannerController _scannerController = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    formats: const [
+      BarcodeFormat.pdf417,
+      BarcodeFormat.aztec,
+      BarcodeFormat.qrCode,
+      BarcodeFormat.dataMatrix,
+      BarcodeFormat.code128,
+      BarcodeFormat.code39,
+    ],
+  );
+
+  bool _torchOn = false;
+  bool _visualAssistGuide = false;
+
+
+  
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final tabs = DefaultTabController.of(context);
+    if (_tabs != tabs) {
+      _tabs?.removeListener(_tabChanged);
+      _tabs = tabs;
+      _tabs!.addListener(_tabChanged);
+      _scanTabActive = tabs.index == 0;
+    }
+  }
+  void _tabChanged() {
+    final active = _tabs?.index == 0;
+    if (mounted && active != _scanTabActive) setState(() => _scanTabActive = active);
+  }
+
+  String _normalizeFlightCode(String input) => normalizeFlightCode(input);
+  String? _sanitizeSeat(String? input) {
+    final seat = normalizeSeat(input ?? '');
+    return seat.isEmpty ? null : seat;
+  }
+
+  bool _looksLikeReasonableName(String? input) {
+    var v = (input ?? '').toUpperCase().trim();
+    if (v.isEmpty) return false;
+    v = v.replaceAll(RegExp(r'[^A-Z\s]'), ' ');
+    final toks = v.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    const stop = {'FLIGHT','DATE','FROM','TO','SEAT','GATE','CLOSES','DEPARTS','BOARDING','JET','JET2','COM','DLM','BRS'};
+    const titles = {'MR','MRS','MS','MISS','MSTR','DR'};
+    final clean = toks.where((t) => !stop.contains(t) && !titles.contains(t) && t.length >= 2).toList();
+    return clean.length >= 2 && clean.join('').length >= 5;
+  }
+
+  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode, String? expectedDate}) {
+    if (raw.contains('|')) {
+      final p = raw.split('|').map((v) => v.trim()).toList();
+      if (p.length != 6) throw const FormatException('Manuel format: UÇUŞ|AD SOYAD|KOLTUK|YYYY-AA-GG|PNR|KALKIŞ');
+      return BoardingPass(flightCode: normalizeFlightCode(p[0]), fullName: p[1],
+        seat: normalizeSeat(p[2]), travelDate: p[3], pnr: p[4].toUpperCase(),
+        origin: p[5].toUpperCase(), destination: '', sequence: '').toMap();
+    }
+    final legs = parseBcbp(raw);
+    if (legs.length == 1) return legs.single.toMap();
+    // Exact leg/date selection is performed with the current flight server data.
+    return selectBcbpLeg(legs, expectedFlightCode ?? '', expectedDate ?? '').toMap();
+  }
+
+  String _normalizeBcbpName(String name) => name.replaceAll('/', ' ').trim();
+
+  String _extractSeatLoose(String text) {
+    final up = text.toUpperCase();
+    // 03-C / 32F / 11E
+    final m = RegExp(r'\b([0-9]{1,2})\s*[-]?\s*([A-Z])\b').firstMatch(up);
+    if (m == null) return '';
+    return '${m.group(1)}${m.group(2)}';
+  }
+
+@override
+  void initState() {
+    super.initState();
+    _loadOffline();
+  }
+
+  Future<void> _loadOffline() async {
+    final snap = await widget.flightRef.get();
+    final data = snap.data() ?? {};
+    setState(() => _offline = (data['offlineMode'] ?? false) == true);
+  }
+
+  Future<void> _toggleOffline(bool v) async {
+    setState(() => _offline = v);
+    await widget.flightRef.set({'offlineMode': v}, SetOptions(merge: true));
+    await _log('OFFLINE_MODE_TOGGLED', meta: {'value': v});
+  }
+
+  Future<String> _emailOf(String uid) async {
+    final s = await Db.userDoc(uid).get();
+    return (s.data()?['email'] ?? '').toString();
+  }
+
+  Future<String> _etdText() async {
+    final s = await widget.flightRef.get();
+    return (s.data()?['etdDateText'] ?? '').toString();
+  }
+
+  Future<void> _log(String type, {Map<String, dynamic>? meta}) async {
+    await widget.flightRef.collection('logs').add({
+      'type': type,
+      'byUid': widget.currentUid,
+      'byEmail': await _emailOf(widget.currentUid),
+      'at': FieldValue.serverTimestamp(),
+      'meta': {...?meta, 'etdDate': await _etdText()},
+    });
+  }
+
+  Future<void> _autoMarkOpTimesForBoarding() async {
+    final snap = await widget.flightRef.get();
+    final data = snap.data() ?? {};
+    final opTimes = Map<String, dynamic>.from(data['opTimes'] ?? const {});
+    final nowIso = DateTime.now().toIso8601String();
+
+    opTimes['ILK_YOLCU_MURACAAT'] ??= nowIso;
+    opTimes['SON_YOLCU_MURACAAT'] = nowIso;
+    opTimes['BOARDING_STARTED'] ??= nowIso;
+
+    await widget.flightRef.set({'opTimes': opTimes}, SetOptions(merge: true));
+  }
+
+
+  String _normPnr(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+
+  int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    final curr = List<int>.filled(b.length + 1, 0);
+    for (var i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      for (var j = 1; j <= b.length; j++) {
+        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+        curr[j] = [curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost].reduce((x, y) => x < y ? x : y);
+      }
+      for (var j = 0; j <= b.length; j++) {
+        prev[j] = curr[j];
+      }
+    }
+    return prev[b.length];
+  }
+
+  double _pnrSimilarityRatio(String a, String b) {
+    final aa = _normPnr(a);
+    final bb = _normPnr(b);
+    if (aa.isEmpty || bb.isEmpty) return 0;
+    final maxLen = aa.length > bb.length ? aa.length : bb.length;
+    if (maxLen == 0) return 1;
+    final dist = _levenshtein(aa, bb);
+    return (maxLen - dist) / maxLen;
+  }
+
+  Future<bool> _isWatchlistMatch(String fullName, {String pnr = ''}) async {
+    final snap = await widget.flightRef.collection('watchlist').get(const GetOptions(source: Source.server));
+    return snap.docs.any((d) => watchlistMatches(fullName,
+      (d.data()['fullName'] ?? '').toString(), pnr: pnr,
+      watchPnr: (d.data()['pnr'] ?? '').toString()));
+  }
+
+  Set<String> _nameKeyVariants(String s) {
+    var up = s.toUpperCase();
+
+    // Common titles / prefixes / suffixes found on boarding passes
+    const titles = [
+      'MR', 'MRS', 'MS', 'MISS', 'MSTR', 'MASTER',
+      'DR', 'PROF', 'SIR', 'MADAM',
+      'INF', 'INFT', 'INFANT', 'CHD', 'CHILD'
+    ];
+
+    // Replace separators with space, keep only A-Z0-9 and spaces
+    up = up.replaceAll('/', ' ').replaceAll('.', ' ').replaceAll('-', ' ');
+    up = up.replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ');
+    up = up.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    if (up.isEmpty) return <String>{};
+
+    var tokens = up.split(' ').where((t) => t.isNotEmpty).toList();
+
+    // Strip titles from start/end (can repeat like "MR MR")
+    while (tokens.isNotEmpty && titles.contains(tokens.first)) tokens.removeAt(0);
+    while (tokens.isNotEmpty && titles.contains(tokens.last)) tokens.removeLast();
+
+    if (tokens.isEmpty) return <String>{};
+
+    final joined = tokens.join('');
+    final reversedJoined = tokens.reversed.join('');
+
+    final keys = <String>{};
+    keys.add(joined);
+    keys.add(reversedJoined);
+
+    // Also add bi-grams for robustness (e.g. LASTFIRSTMR glued)
+    if (tokens.length >= 2) {
+      keys.add(tokens[0] + tokens[1]);
+      keys.add(tokens[1] + tokens[0]);
+    }
+
+    // Single-token matches are intentionally excluded to avoid false positives
+    // like "ZEYNEP TURK" matching "ZEYNEP KOPUZ" only by first name.
+
+    return keys;
+  }
+
+  Future<void> _alertVibrate([int count = 3]) async {
+    for (var i = 0; i < count; i++) {
+      try { Feedback.forLongPress(context); } catch (_) {}
+      try { await HapticFeedback.heavyImpact(); } catch (_) {}
+      try { await HapticFeedback.mediumImpact(); } catch (_) {}
+      try { await HapticFeedback.selectionClick(); } catch (_) {}
+      try { await HapticFeedback.vibrate(); } catch (_) {}
+      try { await SystemSound.play(SystemSoundType.alert); } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 110));
+      try { await HapticFeedback.vibrate(); } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 180));
+    }
+  }
+
+  Future<void> _showManualScanDialogAndProcess({
+    String? prefillName,
+    String? prefillSeat,
+    String? prefillDate,
+    String? prefillFlight,
+    String? prefillPnr,
+  }) async {
+    final flightSnap = await widget.flightRef.get();
+    final expectedFlightCode = _normalizeFlightCode((flightSnap.data()?['flightCode'] ?? '').toString());
+    final nameCtrl = TextEditingController(text: prefillName ?? '');
+    final seatCtrl = TextEditingController(text: prefillSeat ?? '');
+    final dateCtrl = TextEditingController(text: prefillDate ?? '');
+    final dayCtrl = TextEditingController();
+    final monthCtrl = TextEditingController();
+    final yearCtrl = TextEditingController();
+    final _pd = (prefillDate ?? '').split('-');
+    if (_pd.length == 3) { yearCtrl.text = _pd[0]; monthCtrl.text = _pd[1]; dayCtrl.text = _pd[2]; }
+    final flightCtrl = TextEditingController(text: prefillFlight ?? '');
+    final originCtrl = TextEditingController();
+    final pnrCtrl = TextEditingController(text: prefillPnr ?? '');
+    setState(() => _busy = true);
+    final payload = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Manuel Boarding Girişi'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Ad Soyad')),
+              const SizedBox(height: 8),
+              TextField(controller: seatCtrl, decoration: const InputDecoration(labelText: 'Seat Number')),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(child: TextField(controller: dayCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Gün'))),
+                const SizedBox(width: 8),
+                Expanded(child: TextField(controller: monthCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Ay'))),
+                const SizedBox(width: 8),
+                Expanded(child: TextField(controller: yearCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Yıl'))),
+              ]),
+              const SizedBox(height: 8),
+              TextField(controller: flightCtrl, decoration: const InputDecoration(labelText: 'Karttaki Uçuş Kodu')),
+              TextField(controller: originCtrl, decoration: const InputDecoration(labelText: 'Karttaki Kalkış (IATA)')),
+              const SizedBox(height: 8),
+              TextField(controller: pnrCtrl, decoration: const InputDecoration(labelText: 'PNR (opsiyonel)')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
+          FilledButton(
+            onPressed: () {
+              final fc = _normalizeFlightCode(flightCtrl.text.trim());
+              final nm = nameCtrl.text.trim();
+              final st = _sanitizeSeat(seatCtrl.text) ?? '';
+              final dd = dayCtrl.text.trim();
+              final mm = monthCtrl.text.trim();
+              final yy = yearCtrl.text.trim();
+              final dt = (dd.isNotEmpty && mm.isNotEmpty && yy.isNotEmpty) ? '${yy.padLeft(4,'0')}-${mm.padLeft(2,'0')}-${dd.padLeft(2,'0')}' : dateCtrl.text.trim();
+              final pnr = pnrCtrl.text.trim().toUpperCase();
+              final y = int.tryParse(yy.isEmpty ? '0' : yy);
+              final m = int.tryParse(mm.isEmpty ? '0' : mm);
+              final d = int.tryParse(dd.isEmpty ? '0' : dd);
+              final validDate = strictDate(dt) != null;
+              if (fc.isEmpty || !_looksLikeReasonableName(nm) || st.isEmpty || !validDate || originCtrl.text.trim().isEmpty) return;
+              Navigator.pop(ctx, '$fc|$nm|$st|$dt|$pnr|${originCtrl.text.trim().toUpperCase()}');
+            },
+            child: const Text('Scan İşle'),
+          ),
+        ],
+      ),
+    );
+    if (payload == null || payload.trim().isEmpty) {
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await _processScanString(payload, manualEntry: true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+
+  String _ocrNorm(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9/ .:-]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  String _extractNameFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final lines = up.split(RegExp(r'[\r\n]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    for (final l in lines) {
+      if (l.contains('/') && RegExp(r'[A-Z]{2,}/[A-Z]{2,}').hasMatch(l)) {
+        return _normalizeBcbpName(l);
+      }
+    }
+    for (final l in lines) {
+      if (l.contains('NAME') || l.contains('PASSENGER')) continue;
+      final cleaned = l.replaceAll(RegExp(r'\b(MR|MRS|MS|MISS|MSTR|MASTER)\b'), '').trim();
+      if (RegExp(r'^[A-Z]{2,}(\s+[A-Z]{2,}){1,3}$').hasMatch(cleaned)) return cleaned;
+    }
+    return '';
+  }
+
+  String _extractFlightFromVisibleText(String text, String expectedFlight) {
+    final up = _ocrNorm(text);
+    final patterns = [
+      RegExp(r'\b(?:FLIGHT|FLT|UCUS|SEFER)\s*[:#-]?\s*([A-Z0-9]{1,3}\s*0*[0-9]{1,5}[A-Z]?)\b'),
+      RegExp(r'\b(JET2|TUI|SUNEXPRESS)\b.*?\b([A-Z0-9]{1,3}\s*0*[0-9]{1,5}[A-Z]?)\b'),
+    ];
+    for (final p in patterns) {
+      final m = p.firstMatch(up);
+      if (m != null) {
+        final g = (m.group(m.groupCount) ?? '').replaceAll(' ', '');
+        final n = _normalizeFlightCode(g);
+        if (n.isNotEmpty) return n;
+      }
+    }
+    return ''; // Never infer a missing flight from the expected flight.
+  }
+
+  String _extractSeatFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m1 = RegExp(r'\b(?:SEAT|KOLTUK)\s*[:#-]?\s*(\d{1,2}[A-Z])\b').firstMatch(up);
+    if (m1 != null) return (m1.group(1) ?? '').toUpperCase();
+    return _extractSeatLoose(up);
+  }
+
+  String _extractDateFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m = RegExp(r'\b(\d{1,2}[./-][A-Z0-9]{2,3}[./-]\d{2,4}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b').firstMatch(up);
+    return m?.group(1) ?? '';
+  }
+
+  String _extractPnrFromVisibleText(String text) {
+    final up = _ocrNorm(text);
+    final m1 = RegExp(r'\b(?:PNR|BOOKING|RES)\s*[:#-]?\s*([A-Z0-9]{5,8})\b').firstMatch(up);
+    if (m1 != null) return (m1.group(1) ?? '').toUpperCase();
+    return '';
+  }
+
+  Future<void> _runOcrAssistScan() async {
+    final flightSnap = await widget.flightRef.get();
+    final expectedFlightCode = _normalizeFlightCode((flightSnap.data()?['flightCode'] ?? '').toString());
+    setState(() => _busy = true);
+    try {
+      final allText = await _ocr.captureText();
+      if (allText == null) return;
+      if (allText.trim().isEmpty) {
+        throw Exception('OCR metin okuyamadı. Lütfen tekrar dene veya manuel form kullan.');
+      }
+      final prefillFlight = _extractFlightFromVisibleText(allText, expectedFlightCode);
+      final _prefillNameRaw = _extractNameFromVisibleText(allText);
+      final prefillName = _looksLikeReasonableName(_prefillNameRaw) ? _prefillNameRaw : '';
+      final prefillSeat = _sanitizeSeat(_extractSeatFromVisibleText(allText)) ?? '';
+      final prefillDate = _extractDateFromVisibleText(allText);
+      final prefillPnr = _extractPnrFromVisibleText(allText);
+      if (mounted) {
+        setState(() {
+          _lastParsedPreview = 'OCR: ${prefillFlight.isEmpty ? '-' : prefillFlight} • ${prefillName.isEmpty ? '-' : prefillName} • ${prefillSeat.isEmpty ? '-' : prefillSeat}';
+        });
+      }
+      await _showManualScanDialogAndProcess(
+        prefillName: prefillName,
+        prefillSeat: prefillSeat,
+        prefillDate: prefillDate,
+        prefillFlight: prefillFlight,
+        prefillPnr: prefillPnr,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OCR hata: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _showCriticalGateBlockScreen({required String expected, required String got}) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => Dialog(
+        insetPadding: EdgeInsets.zero,
+        backgroundColor: Colors.black,
+        child: SizedBox.expand(
+          child: Container(
+            color: Colors.black,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  'YANLIŞ YOLCU\nGATE\'E KABUL ETME',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w900,
+                    height: 1.15,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Beklenen: $expected\nOkunan: $got',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showResultScreen({required Color bg, required String title, String? subtitle}) async {
+    if (!mounted) return;
+    final fg = bg.computeLuminance() < 0.35 ? Colors.white : Colors.black;
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (ctx) => Dialog.fullscreen(child: ColoredBox(color: bg,
+        child: SafeArea(child: Center(child: Padding(padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(title, textAlign: TextAlign.center,
+              style: TextStyle(color: fg, fontSize: 30, fontWeight: FontWeight.w900)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 20),
+              Text(subtitle, textAlign: TextAlign.center, style: TextStyle(color: fg, fontSize: 20)),
+            ],
+            const SizedBox(height: 24),
+            FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          ]),
+        ))),
+      )),
+    );
+  }
+
+  Future<void> _processScanString(String raw, {bool manualEntry = false}) async {
+    final f = (await widget.flightRef.get(const GetOptions(source: Source.server))).data();
+    if (f == null || f['closed'] == true) throw Exception('Uçuş kapalı/bulunamadı.');
+    final expected = (f['flightCode'] ?? '').toString();
+    final date = (f['etdDateText'] ?? '').toString();
+    BoardingPass pass;
+    if (manualEntry && raw.contains('|')) {
+      final p = _parseScanPayload(raw);
+      pass = BoardingPass(fullName: p['fullName']!, pnr: p['pnr']!, origin: p['origin']!,
+        destination: '', flightCode: p['flightCode']!, seat: p['seat']!,
+        sequence: '', travelDate: p['travelDate']);
+    } else {
+      final legs = parseBcbp(raw);
+      if (legs.length == 1) {
+        pass = legs.single;
+      } else {
+        pass = selectBcbpLeg(legs, expected, date);
+      }
+    }
+    if (normalizeFlightCode(pass.flightCode).isEmpty || pass.origin.isEmpty ||
+        (pass.julianDay == null && strictDate(pass.travelDate ?? '') == null) ||
+        pass.fullName.trim().isEmpty || pass.seat.isEmpty) {
+      throw const FormatException('Kart bilgileri eksik veya doğrulanamıyor. Manuel doğrulama gerekli.');
+    }
+    final error = validationError(pass, expected, date);
+    if (error != null) {
+      await _log('PAX_VALIDATION_BLOCKED', meta: {'reason': error});
+      await _alertVibrate(3);
+      await _showResultScreen(bg: Colors.purple, title: 'WRONG FLIGHT', subtitle: error);
+      return;
+    }
+    final isWl = await _isWatchlistMatch(pass.fullName, pnr: pass.pnr);
+    if (isWl) {
+      await _alertVibrate(3);
+      await _showResultScreen(bg: Colors.red, title: 'FLY PASSENGER ATTENTION!!!',
+        subtitle: 'Yalnız DFT Random ile devam edilebilir.');
+    }
+    if (!mounted) return;
+    final choice = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('Boarding Seçimi'),
+      content: Text('${pass.fullName} • ${pass.seat}'),
+      actions: [
+        TextButton(onPressed: isWl ? null : () => Navigator.pop(ctx, 'PRE'), child: const Text('Pre-BOARD')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, 'RANDOM'), child: const Text('DFT Random')),
+      ],
+    ));
+    if (choice == null) return;
+    _confirmedAdultId = null;
+    if (await _handleSeatDuplicateOrInfant(fullName: pass.fullName, seat: pass.seat, pnr: pass.pnr)) return;
+    var confirmedWatchlist = isWl;
+    try {
+      confirmedWatchlist = await BoardingRepository(widget.flightRef, widget.currentUid).board(pass,
+        random: choice == 'RANDOM', watchlist: isWl, manual: manualEntry, adultId: _confirmedAdultId);
+    } on DuplicateBoarding {
+      await _showResultScreen(bg: Colors.grey, title: 'ALREADY BOARDED / DUPLICATE');
+      return;
+    }
+    await _showResultScreen(bg: confirmedWatchlist ? Colors.red : choice == 'PRE' ? Colors.green : Colors.blue,
+      title: confirmedWatchlist ? 'FLY PASSENGER ATTENTION!!!' : choice == 'PRE' ? 'PRE-BOARD SUCCESSFUL' : 'DFT RANDOM SUCCESSFUL');
+  }
+
+  String? _confirmedAdultId;
+
+  bool _isBoardedStatus(String s) {
+    final v = s.trim().toUpperCase();
+    return v == 'PREBOARDED' || v == 'DFT_BOARDED';
+  }
+
+
+  Future<bool> _handleSeatDuplicateOrInfant({
+    required String fullName,
+    required String seat,
+    required String pnr,
+  }) async {
+    final seatKey = seat.trim().toUpperCase();
+    if (seatKey.isEmpty) return false;
+
+    final seatSnap = await widget.flightRef.collection('pax').where('seat', isEqualTo: seatKey).get();
+    final boarded = seatSnap.docs.where((d) => _isBoardedStatus((d.data()['status'] ?? '').toString())).toList();
+    if (boarded.isEmpty) return false;
+
+    // Same seat already boarded. If same passenger => duplicate. Otherwise ask infant flow.
+    final sameName = boarded.where((d) {
+      final n = (d.data()['fullName'] ?? '').toString().trim().toUpperCase();
+      return watchlistMatches(n, fullName);
+    }).toList();
+
+    final hit = (sameName.isNotEmpty ? sameName.first : boarded.first);
+    final hitData = hit.data();
+    final boardedName = (hitData['fullName'] ?? '').toString();
+    final boardedStatus = (hitData['status'] ?? '').toString();
+
+    if (sameName.isNotEmpty) {
+      await _showResultScreen(bg: Colors.grey, title: 'ALREADY BOARDED / DUPLICATE');
+      return true;
+    }
+
+    if (!mounted) return true;
+    final infant = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Aynı Koltuk Tespit Edildi'),
+        content: Text('Koltuk $seatKey zaten board edildi (Yolcu: $boardedName). Bu yolcu infant mı?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Infant')),
+        ],
+      ),
+    );
+
+    if (infant == true) {
+      _confirmedAdultId = hit.id;
+      await _log('PAX_INFANT_SEAT_OVERRIDE_ALLOWED', meta: {
+        'seat': seatKey,
+        'newFullName': fullName,
+        'newPnr': pnr,
+        'existingPaxId': hit.id,
+        'existingFullName': boardedName,
+      });
+      return false;
+    }
+
+    await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
+      'reason': 'seat_conflict_non_infant',
+      'seat': seatKey,
+      'fullName': fullName,
+      'pnr': pnr,
+      'existingPaxId': hit.id,
+      'existingFullName': boardedName,
+      'existingStatus': boardedStatus,
+    });
+    await _alertVibrate(3);
+    await _showResultScreen(
+      bg: Colors.grey,
+      title: 'MUKERRER KART',
+      subtitle: 'Koltuk $seatKey zaten board edildi.',
+    );
+    return true;
+  }
+
+  Future<bool> _showDuplicateIfNeeded(DocumentReference<Map<String, dynamic>> paxRef, {String? fallbackName, String? fallbackSeat}) async {
+    final snap = await paxRef.get();
+    final data = snap.data() ?? {};
+    final status = (data['status'] ?? '').toString();
+    if (!_isBoardedStatus(status)) return false;
+
+    final fullName = ((data['fullName'] ?? fallbackName) ?? '').toString();
+    final seat = ((data['seat'] ?? fallbackSeat) ?? '').toString();
+    await _log('PAX_DUPLICATE_SCAN_BLOCKED', meta: {
+      'paxId': paxRef.id,
+      'fullName': fullName,
+      'seat': seat,
+      'status': status,
+    });
+
+    if (!mounted) return true;
+    await _alertVibrate(3);
+    await _showResultScreen(
+      bg: Colors.grey,
+      title: 'MUKERRER KART',
+      subtitle: 'Bu yolcu zaten board edildi${seat.isNotEmpty ? ' • Koltuk: $seat' : ''}',
+    );
+    return true;
+  }
+
+  Future<void> _manualBoardOrOffload({required bool offload}) async {
+    // Select pax from list (simple dialog)
+    final pax = await widget.flightRef.collection('pax').orderBy('fullName').get();
+    final docs = pax.docs;
+
+    if (!mounted) return;
+
+    final selected = await showDialog<QueryDocumentSnapshot<Map<String, dynamic>>>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(offload ? 'Manuel Offload' : 'Manuel Boardlama'),
+          content: SizedBox(
+            width: 420,
+            height: 420,
+            child: ListView.builder(
+              itemCount: docs.length,
+              itemBuilder: (_, i) {
+                final d = docs[i];
+                final data = d.data();
+                final fullName = (data['fullName'] ?? '').toString();
+                final seat = (data['seat'] ?? '').toString();
+                final status = (data['status'] ?? 'NONE').toString();
+                return ListTile(
+                  title: Text(fullName.isEmpty ? '—' : fullName),
+                  subtitle: Text('Seat: $seat  •  Status: $status'),
+                  onTap: () => Navigator.pop(context, d),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Kapat')),
+          ],
+        );
+      },
+    );
+
+    if (selected == null) return;
+
+    if (offload) {
+      await BoardingRepository(widget.flightRef, widget.currentUid).offload(selected.reference);
+    } else {
+      final data = selected.data();
+      await _showManualScanDialogAndProcess(prefillName: data['fullName']?.toString(),
+        prefillSeat: data['seat']?.toString(), prefillPnr: data['pnr']?.toString());
+    }
+  }
+
+  Future<void> _inviteUser() async {
+    final meRoleSnap = await Db.userDoc(widget.currentUid).get();
+    final myRole = _normalizeRoleValue(meRoleSnap.data()?['role'], email: (meRoleSnap.data()?['email'] ?? FirebaseAuth.instance.currentUser?.email).toString());
+
+    final fSnap = await widget.flightRef.get();
+    final ownerUid = (fSnap.data()?['ownerUid'] ?? '').toString();
+
+    final canInvite = _isOwnerSupervisorOrAdmin(currentUid: widget.currentUid, ownerUid: ownerUid, role: myRole, currentEmail: FirebaseAuth.instance.currentUser?.email);
+
+    if (!canInvite) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sadece uçuş sahibi Agent, Supervisor veya Admin davet gönderebilir.')),
+      );
+      return;
+    }
+
+    final participants = ((fSnap.data()?['participants'] as List?) ?? const []).length;
+    final pendingInvitesSnap = await Db.invites().where('flightId', isEqualTo: widget.flightRef.id).get();
+    final pendingInvites = pendingInvitesSnap.docs.where((d) => (d.data()['status'] ?? '').toString() == 'PENDING').length;
+    if (participants + pendingInvites >= 7) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Bu uçuş için en fazla 7 kullanıcı davet edilebilir.')),
+      );
+      return;
+    }
+
+    final emailC = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Kullanıcı Davet Et'),
+        content: TextField(
+          controller: emailC,
+          decoration: const InputDecoration(labelText: 'Kullanıcı email veya username'),
+          keyboardType: TextInputType.emailAddress,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Davet Gönder')),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    final rawInput = emailC.text.trim();
+    if (rawInput.isEmpty) return;
+
+    final normalizedInput = rawInput.toLowerCase();
+    final inviteeUsernameLower = normalizedInput.contains('@')
+        ? normalizedInput.split('@').first.trim()
+        : normalizedInput;
+
+    try {
+      String inviteeEmail = normalizedInput;
+      String inviteeUid = '';
+      final userQ = await Db.users().where(
+        normalizedInput.contains('@') ? 'email' : 'usernameLower',
+        isEqualTo: normalizedInput.contains('@') ? normalizedInput : inviteeUsernameLower,
+      ).limit(2).get(const GetOptions(source: Source.server));
+      if (userQ.docs.length > 1) throw Exception('Kullanıcı adı belirsiz. Tam email adresi kullanın.');
+      if (userQ.docs.length == 1) {
+        final u = userQ.docs.first;
+        final ud = u.data();
+        inviteeUid = u.id;
+        inviteeEmail = (ud['email'] ?? inviteeEmail).toString().trim().toLowerCase();
+      } else {
+        // Legacy users may not have usernameLower; try email fallback as username@domain guess is not safe.
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Davet gönderilememiştir. Kullanıcı bulunamadı.')),
+          );
+        }
+        return;
+      }
+
+      final fData = fSnap.data() ?? {};
+      final flightCode = (fData['flightCode'] ?? '').toString();
+
+      final dupSnap = await Db.invites().where('flightId', isEqualTo: widget.flightRef.id).get();
+      final hasDup = dupSnap.docs.any((d) {
+        final m = d.data();
+        if ((m['status'] ?? '').toString() != 'PENDING') return false;
+        final iu = (m['inviteeUid'] ?? '').toString();
+        final ie = (m['inviteeEmail'] ?? '').toString().trim().toLowerCase();
+        final iun = (m['inviteeUsernameLower'] ?? '').toString().trim().toLowerCase();
+        if (inviteeUid.isNotEmpty && iu == inviteeUid) return true;
+        if (inviteeEmail.isNotEmpty && ie == inviteeEmail) return true;
+        return iun == inviteeUsernameLower;
+      });
+      if (hasDup) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Davet gönderilememiştir. Bu kullanıcıya bekleyen davet var.')),
+          );
+        }
+        return;
+      }
+
+      await Db.invites().doc('${widget.flightRef.id}_$inviteeUid').set({
+        'flightId': widget.flightRef.id,
+        'flightCode': flightCode,
+        'inviteeEmail': inviteeEmail,
+        'inviteeUid': inviteeUid,
+        'inviteeUsernameLower': inviteeUsernameLower,
+        'status': 'PENDING',
+        'createdAt': FieldValue.serverTimestamp(),
+        'createdByUid': widget.currentUid,
+      });
+
+      await _log('INVITE_SENT', meta: {
+        'inviteeEmail': inviteeEmail,
+        'inviteeUsernameLower': inviteeUsernameLower,
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Davet gönderilmiştir.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Davet gönderilememiştir.')),
+        );
+      }
+    }
+  }
+
+
+  String _truncate(String s, [int max = 140]) {
+    if (s.length <= max) return s;
+    return s.substring(0, max) + '…';
+  }
+
+  String _previewFromParsed(Map<String, String?> p, String raw) {
+    final fc = (p['flightCode'] ?? '').trim();
+    final nm = (p['fullName'] ?? '').trim();
+    final st = (p['seat'] ?? '').trim();
+    final pn = (p['pnr'] ?? '').trim();
+    return 'FLIGHT: $fc  SEAT: $st\nNAME: $nm';
+  }
+
+  Future<void> _onCameraDetect(BarcodeCapture capture) async {
+    if (!_cameraOn || !_scanTabActive || _busy) return;
+    String raw = '';
+    for (final b in capture.barcodes) {
+      final v = b.rawValue ?? b.displayValue ?? '';
+      if (v.trim().isNotEmpty) {
+        raw = v;
+        break;
+      }
+    }
+    if (raw.trim().isEmpty) return;
+
+    final now = DateTime.now();
+    if (_lastCamRaw == raw && _lastCamHitAt != null && now.difference(_lastCamHitAt!).inMilliseconds < 1200) {
+      return;
+    }
+    _lastCamRaw = raw;
+    _lastCamHitAt = now;
+    setState(() => _busy = true);
+
+    try {
+      final fSnap0 = await widget.flightRef.get();
+      final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
+      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode,
+        expectedDate: (fSnap0.data()?['etdDateText'] ?? '').toString());
+      if (mounted) {
+        setState(() => _lastParsedPreview = _previewFromParsed(parsed, raw));
+      }
+      await _processScanString(raw);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _lastParsedPreview = 'Kart doğrulanamadı: $e');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabs?.removeListener(_tabChanged);
+    _lastCamRaw = null;
+    _manualScan.dispose();
+    _ocr.close();
+    _scannerController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: widget.flightRef.snapshots(),
+      builder: (context, flightSnap) {
+        final fData = flightSnap.data?.data() ?? <String, dynamic>{};
+        final isClosed = (fData['closed'] ?? false) == true;
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: widget.flightRef.collection('pax').snapshots(),
+          builder: (context, paxSnap) {
+            final paxDocs = paxSnap.data?.docs ?? const [];
+            final bookedTarget = int.tryParse((fData['bookedPax'] ?? 0).toString()) ?? 0;
+            final dft = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'DFT_BOARDED').length;
+            final pre = paxDocs.where((d) => (d.data()['status'] ?? '').toString() == 'PREBOARDED').length;
+            final pctBooked = bookedTarget == 0 ? 0.0 : (dft * 100.0 / bookedTarget);
+            final boardedTotal = pre + dft;
+            final pctBoarded = boardedTotal == 0 ? 0.0 : (dft * 100.0 / boardedTotal);
+
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _GlassPanel(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('DFT / Booked Pax', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 4),
+                                    Text('%${pctBooked.toStringAsFixed(1)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                                    Text('$dft / $bookedTarget', style: const TextStyle(fontSize: 11)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _GlassPanel(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('DFT / (Pre+DFT)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 4),
+                                    Text('%${pctBoarded.toStringAsFixed(1)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                                    Text('$dft / $boardedTotal', style: const TextStyle(fontSize: 11)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        Wrap(spacing: 8, children: [
+                          TextButton.icon(onPressed: _busy || isClosed ? null : _inviteUser,
+                            icon: const Icon(Icons.person_add), label: const Text('Ekibe Davet')),
+                          TextButton(onPressed: _busy || isClosed ? null : () => _manualBoardOrOffload(offload: false),
+                            child: const Text('Listeden Manuel Giriş')),
+                          TextButton(onPressed: _busy || isClosed ? null : () => _manualBoardOrOffload(offload: true),
+                            child: const Text('Offload')),
+                        ]),
+                        const Divider(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              SwitchListTile(
+                                value: isClosed ? false : _cameraOn,
+                                onChanged: isClosed ? null : (v) => setState(() => _cameraOn = v),
+                                title: Text(isClosed ? 'Kamera (Scan) • KAPALI UÇUŞ' : 'Kamera (Scan)'),
+                                subtitle: Text(isClosed
+                                    ? 'Uçuş kapatıldığı için kamera ve scan işlemleri devre dışı.'
+                                    : 'Varsayılan açık. İstersen kapatıp manuel giriş yapabilirsin.'),
+                              ),
+                              if (isClosed)
+                                const Padding(
+                                  padding: EdgeInsets.only(bottom: 8),
+                                  child: _GlassPanel(
+                                    padding: EdgeInsets.all(10),
+                                    child: Text(
+                                      'Bu uçuş kapatılmıştır. Scan/boarding işlemi yapılamaz.',
+                                      style: TextStyle(fontWeight: FontWeight.w700),
+                                    ),
+                                  ),
+                                ),
+                              if (!isClosed && _cameraOn && _scanTabActive) ...[
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(16),
+                                  child: AspectRatio(
+                                    aspectRatio: 16 / 9,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        MobileScanner(
+                                          controller: _scannerController,
+                                          onDetect: _onCameraDetect,
+                                        ),
+                                        if (_visualAssistGuide)
+                                          IgnorePointer(
+                                            child: Center(
+                                              child: Container(
+                                                width: 290,
+                                                height: 160,
+                                                decoration: BoxDecoration(
+                                                  border: Border.all(color: Colors.white, width: 2),
+                                                  borderRadius: BorderRadius.circular(12),
+                                                ),
+                                                child: Align(
+                                                  alignment: Alignment.topCenter,
+                                                  child: Container(
+                                                    margin: const EdgeInsets.only(top: 6),
+                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                                    color: Colors.black54,
+                                                    child: const Text(
+                                                      'BARKOD / FLIGHT / SEAT',
+                                                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        Align(
+                                          alignment: Alignment.topRight,
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(8),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: 'Torch',
+                                                  onPressed: () async {
+                                                    await _scannerController.toggleTorch();
+                                                    if (mounted) setState(() => _torchOn = !_torchOn);
+                                                  },
+                                                  icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                              ],
+                              if (_lastParsedPreview != null) ...[
+                                Text(_lastParsedPreview!, style: const TextStyle(fontSize: 12)),
+                                const SizedBox(height: 8),
+                              ],
+                              SwitchListTile(
+                                value: _visualAssistGuide,
+                                onChanged: isClosed ? null : (v) => setState(() => _visualAssistGuide = v),
+                                title: const Text('Görsel Rehber Çerçevesi'),
+                                subtitle: const Text('OCR değil; barkod ve kart hizalama yardımı.'),
+                              ),
+                              if (!kIsWeb) SwitchListTile(
+                                value: _ocrAssistEnabled,
+                                onChanged: isClosed ? null : (v) => setState(() => _ocrAssistEnabled = v),
+                                title: const Text('OCR Yardımı (Kamera metin okuma)'),
+                                subtitle: const Text('Opsiyonel. Kartın görünür metnini okuyup formu doldurur.'),
+                              ),
+                              if (_ocrAssistEnabled)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: SizedBox(
+                                    width: double.infinity,
+                                    child: OutlinedButton.icon(
+                                      onPressed: (_busy || isClosed) ? null : _runOcrAssistScan,
+                                      icon: const Icon(Icons.document_scanner),
+                                      label: const Text('OCR ile Kart Tara'),
+                                    ),
+                                  ),
+                                ),
+                              TextField(
+                                controller: _manualScan,
+                                enabled: !isClosed,
+                                decoration: const InputDecoration(
+                                  labelText: 'Ham Manuel Scan (FLIGHT|FULLNAME|SEAT|DATE)',
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: (_busy || isClosed) ? null : _showManualScanDialogAndProcess,
+                                  icon: const Icon(Icons.edit_note),
+                                  label: const Text('Manuel Boarding Formu'),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  onPressed: (_busy || isClosed)
+                                      ? null
+                                      : () async {
+                                          setState(() => _busy = true);
+                                          try {
+                                            await _processScanString(_manualScan.text, manualEntry: true);
+                                          } catch (e) {
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(e.toString())),
+                                              );
+                                            }
+                                          } finally {
+                                            if (mounted) setState(() => _busy = false);
+                                          }
+                                        },
+                                  child: _busy
+                                      ? const SizedBox(
+                                          height: 18,
+                                          width: 18,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Text('Ham Veriyi Scan İşle'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+
+}
+// ==========================
+// Tab 2: Pax list (Preboard + DFT boarded + search) + Offloaded separate
+// ==========================
+
+class PaxListTab extends StatefulWidget {
+  final DocumentReference<Map<String, dynamic>> flightRef;
+  final String currentUid;
+
+  const PaxListTab({super.key, required this.flightRef, required this.currentUid});
+
+  @override
+  State<PaxListTab> createState() => _PaxListTabState();
+}
+
+class _PaxListTabState extends State<PaxListTab> {
+  String _q = '';
+
+  int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    final curr = List<int>.filled(b.length + 1, 0);
+    for (int i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      for (int j = 1; j <= b.length; j++) {
+        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+        final del = prev[j] + 1;
+        final ins = curr[j - 1] + 1;
+        final sub = prev[j - 1] + cost;
+        curr[j] = [del, ins, sub].reduce((x, y) => x < y ? x : y);
+      }
+      for (int j = 0; j <= b.length; j++) {
+        prev[j] = curr[j];
+      }
+    }
+    return prev[b.length];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = widget.flightRef.collection('pax').orderBy('fullName').snapshots();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search),
+              labelText: 'Yolcu adı / seat ara',
+            ),
+            onChanged: (v) => setState(() => _q = v.trim().toLowerCase()),
+          ),
+        ),
+        Expanded(
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: stream,
+            builder: (context, snap) {
+              final docs = snap.data?.docs ?? [];
+              final filtered = docs.where((d) {
+                final data = d.data();
+                final name = (data['fullName'] ?? '').toString().toLowerCase();
+                final seat = (data['seat'] ?? '').toString().toLowerCase();
+                if (_q.isEmpty) return true;
+                return name.contains(_q) || seat.contains(_q);
+              }).toList();
+
+              final pre = filtered.where((d) => (d.data()['status'] ?? '') == 'PREBOARDED').toList();
+              final dft = filtered.where((d) => (d.data()['status'] ?? '') == 'DFT_BOARDED').toList();
+              final off = filtered.where((d) => (d.data()['status'] ?? '') == 'OFFLOADED').toList();
+              final other = filtered.where((d) {
+                final s = (d.data()['status'] ?? '').toString();
+                return s != 'PREBOARDED' && s != 'DFT_BOARDED' && s != 'OFFLOADED';
+              }).toList();
+
+              return ListView(
+                children: [
+                  _Section(title: 'PREBOARDED', count: pre.length, children: pre.map(_paxTile).toList()),
+                  _Section(title: 'DFT BOARDED (Random)', count: dft.length, children: dft.map(_paxTile).toList()),
+                  _Section(title: 'OFFLOADED', count: off.length, children: off.map(_paxTile).toList()),
+                  _Section(title: 'Diğer', count: other.length, children: other.map(_paxTile).toList()),
+                  const SizedBox(height: 24),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _paxTile(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final data = d.data();
+    final name = (data['fullName'] ?? '').toString();
+    final seat = (data['seat'] ?? '').toString();
+    final pnr = (data['pnr'] ?? '').toString();
+    final status = (data['status'] ?? 'NONE').toString();
+    final isWatchlistHit = (data['watchlistMatch'] ?? false) == true;
+    final wlTextStyle = isWatchlistHit ? const TextStyle(color: Colors.black, fontWeight: FontWeight.w800) : null;
+
+    final boardedBy = (data['boardedByEmail'] ?? '').toString();
+    final manualBoardedBy = (data['manualBoardedByEmail'] ?? '').toString();
+    final offBy = (data['offloadedByEmail'] ?? '').toString();
+
+    DateTime? boardedAt;
+    final tsB = data['boardedAt'];
+    if (tsB is Timestamp) boardedAt = tsB.toDate();
+
+    DateTime? offAt;
+    final tsO = data['offloadedAt'];
+    if (tsO is Timestamp) offAt = tsO.toDate();
+
+    String timeStr(DateTime? dt) => dt == null ? '—' : DateFormat('yyyy-MM-dd HH:mm').format(dt);
+
+    return ListTile(
+      tileColor: isWatchlistHit ? Colors.red : null,
+      title: Text(name.isEmpty ? '—' : name, style: wlTextStyle),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Seat: $seat  •  PNR: ${pnr.isEmpty ? "—" : pnr}', style: wlTextStyle),
+          Text('Status: $status', style: wlTextStyle),
+          Text('Boarded: ${timeStr(boardedAt)}  •  By: ${boardedBy.isEmpty ? "—" : boardedBy}', style: wlTextStyle),
+          if (manualBoardedBy.isNotEmpty)
+            Text('Manual boarding: EVET  •  Manually boarded by: $manualBoardedBy',
+                style: isWatchlistHit
+                    ? const TextStyle(color: Colors.black, fontWeight: FontWeight.w900)
+                    : const TextStyle(fontWeight: FontWeight.w700)),
+          Text('Offload: ${timeStr(offAt)}  •  By: ${offBy.isEmpty ? "—" : offBy}', style: wlTextStyle),
+        ],
+      ),
+      isThreeLine: false,
+      trailing: PopupMenuButton<String>(
+        onSelected: (v) async {
+          if (v == 'BOARD') {
+            await _manualBoard(d);
+          } else if (v == 'OFFLOAD') {
+            await _manualOffload(d);
+          }
+        },
+        itemBuilder: (_) {
+          final canManualBoard = status != 'PREBOARDED' && status != 'DFT_BOARDED';
+          final canOffload = status == 'PREBOARDED' || status == 'DFT_BOARDED';
           return [
             PopupMenuItem(
               value: 'BOARD',
