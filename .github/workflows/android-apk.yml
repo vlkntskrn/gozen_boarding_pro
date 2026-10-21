@@ -3,7 +3,7 @@ name: Android APK Build
 on:
   workflow_dispatch:
   push:
-    branches: [ "main", "fix/security-boarding-validation" ]
+    branches: [ "main", "fix/security-boarding-validation", "feat/web-preview" ]
 
 jobs:
   build-apk:
