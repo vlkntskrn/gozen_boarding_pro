@@ -128,4 +128,10 @@ void main() {
     expect(watchlistMatches('SMITH/JOHN', 'SMITH/JOHNNY'), isFalse);
     expect(watchlistMatches('AKBULUT/FATIH', 'AKBULUT/FATI'), isFalse);
   });
+  test('declared variable trailing spaces are data, not transport padding', () {
+    final card = ls1730.substring(0, 58) + '02  ';
+    expect(parseBcbp(card).single.flightCode, 'LS1730');
+    expect(() => parseBcbp(card.trim()), throwsFormatException);
+  });
+
 }

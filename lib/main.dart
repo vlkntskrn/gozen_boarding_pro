@@ -2003,7 +2003,7 @@ class _ScanTabState extends State<ScanTab> {
     return clean.length >= 2 && clean.join('').length >= 5;
   }
 
-  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode}) {
+  Map<String, String> _parseScanPayload(String raw, {String? expectedFlightCode, String? expectedDate}) {
     if (raw.contains('|')) {
       final p = raw.split('|').map((v) => v.trim()).toList();
       if (p.length != 6) throw const FormatException('Manuel format: UÇUŞ|AD SOYAD|KOLTUK|YYYY-AA-GG|PNR|KALKIŞ');
@@ -2014,9 +2014,7 @@ class _ScanTabState extends State<ScanTab> {
     final legs = parseBcbp(raw);
     if (legs.length == 1) return legs.single.toMap();
     // Exact leg/date selection is performed with the current flight server data.
-    final hits = legs.where((p) => flightCodesMatch(expectedFlightCode ?? '', p.flightCode) && p.origin == 'DLM').toList();
-    if (hits.length != 1) throw const FormatException('Birden çok/belirsiz segment; manuel doğrulama gerekli.');
-    return hits.single.toMap();
+    return selectBcbpLeg(legs, expectedFlightCode ?? '', expectedDate ?? '').toMap();
   }
 
   String _normalizeBcbpName(String name) => name.replaceAll('/', ' ').trim();
@@ -2448,6 +2446,11 @@ class _ScanTabState extends State<ScanTab> {
         pass = selectBcbpLeg(legs, expected, date);
       }
     }
+    if (normalizeFlightCode(pass.flightCode).isEmpty || pass.origin.isEmpty ||
+        (pass.julianDay == null && strictDate(pass.travelDate ?? '') == null) ||
+        pass.fullName.trim().isEmpty || pass.seat.isEmpty) {
+      throw const FormatException('Kart bilgileri eksik veya doğrulanamıyor. Manuel doğrulama gerekli.');
+    }
     final error = validationError(pass, expected, date);
     if (error != null) {
       await _log('PAX_VALIDATION_BLOCKED', meta: {'reason': error});
@@ -2787,8 +2790,8 @@ class _ScanTabState extends State<ScanTab> {
     if (!_cameraOn || !_scanTabActive || _busy) return;
     String raw = '';
     for (final b in capture.barcodes) {
-      final v = (b.rawValue ?? b.displayValue ?? '').trim();
-      if (v.isNotEmpty) {
+      final v = b.rawValue ?? b.displayValue ?? '';
+      if (v.trim().isNotEmpty) {
         raw = v;
         break;
       }
@@ -2806,7 +2809,8 @@ class _ScanTabState extends State<ScanTab> {
     try {
       final fSnap0 = await widget.flightRef.get();
       final expectedCode = (fSnap0.data()?['flightCode'] ?? '').toString();
-      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode);
+      final parsed = _parseScanPayload(raw, expectedFlightCode: expectedCode,
+        expectedDate: (fSnap0.data()?['etdDateText'] ?? '').toString());
       if (mounted) {
         setState(() => _lastParsedPreview = _previewFromParsed(parsed, raw));
       }
@@ -3038,7 +3042,7 @@ class _ScanTabState extends State<ScanTab> {
                                       : () async {
                                           setState(() => _busy = true);
                                           try {
-                                            await _processScanString(_manualScan.text.trim(), manualEntry: true);
+                                            await _processScanString(_manualScan.text, manualEntry: true);
                                           } catch (e) {
                                             if (mounted) {
                                               ScaffoldMessenger.of(context).showSnackBar(
@@ -4427,7 +4431,7 @@ class _BoardingPassScannerPageState extends State<BoardingPassScannerPage> {
         try {
           await _controller.stop();
         } catch (_) {}
-        if (mounted) Navigator.of(context).pop(raw.trim());
+        if (mounted) Navigator.of(context).pop(raw);
         return;
       }
     }
