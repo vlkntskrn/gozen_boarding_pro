@@ -18,6 +18,17 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+
+Map<String, dynamic> _privacySafeLogMeta(Map<String, dynamic>? input, String etdDate) {
+  final sanitized = Map<String, dynamic>.from(input ?? const <String, dynamic>{});
+  sanitized.removeWhere((key, _) {
+    final lower = key.toLowerCase();
+    return lower.contains('raw') || lower.contains('barcode') || lower.contains('payload');
+  });
+  sanitized['etdDate'] = etdDate;
+  return sanitized;
+}
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -2432,7 +2443,7 @@ Set<String> _flightCodeAlternatives(String code) {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -4090,7 +4101,7 @@ class _PaxListTabState extends State<PaxListTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -4284,7 +4295,7 @@ class WatchlistTab extends StatelessWidget {
       'byUid': currentUid,
       'byEmail': await _emailOf(currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -4781,7 +4792,7 @@ class _OpTimesTabState extends State<OpTimesTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
@@ -5068,7 +5079,7 @@ class _ReportTabState extends State<ReportTab> {
       'byUid': widget.currentUid,
       'byEmail': await _emailOf(widget.currentUid),
       'at': FieldValue.serverTimestamp(),
-      'meta': {...?meta, 'etdDate': await _etdText()},
+      'meta': _privacySafeLogMeta(meta, await _etdText()),
     });
   }
 
