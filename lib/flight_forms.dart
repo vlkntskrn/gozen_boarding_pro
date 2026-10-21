@@ -72,10 +72,17 @@ List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data
  final searched=Map<String,dynamic>.from(data['pax']).values.where((p)=>p['searched']==true).toList();
  final fields=Map<String,dynamic>.from(data['fields']);
  body.children.clear();
- final pages=(searched.length/15).ceil().clamp(1,1000);
+ final pages=searched.isEmpty?1:(searched.length/15).ceil();
+ if(pages>1000) throw const FormatException('Arama formu kapasitesi aşıldı.');
  for(var page=0;page<pages;page++) {
   if(page>0) body.children.add(XmlElement(XmlName('p','w'),[],[XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('br','w'),[XmlAttribute(XmlName('type','w'),'page')])])]));
   final nodes=original.map((n)=>n.copy()).toList();
+  if(page>0) for(final n in nodes.whereType<XmlElement>()) {
+   for(final graphic in [...n.findAllElements('wp:docPr'),...n.findAllElements('pic:cNvPr')]) {
+    final id=int.tryParse(graphic.getAttribute('id')??'');
+    if(id!=null) graphic.setAttribute('id','${id+page*10000}');
+   }
+  }
   for(final n in nodes.whereType<XmlElement>()) {
    for(final p in [if(n.name.qualified=='w:p') n,...n.findAllElements('w:p')]) {
     final text=p.findAllElements('w:t').map((t)=>t.innerText).join();

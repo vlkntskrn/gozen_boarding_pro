@@ -90,4 +90,19 @@ void main(){
   File('build/form-qa/daily.xlsx').writeAsBytesSync(report);
   File('build/form-qa/ba.xlsx').writeAsBytesSync(baReport);
  });
+ test('sixteen searched passengers create two complete forms without duplicate drawing IDs',()async{
+  final l=LocalFlight(spec,'agent',(s)async{});
+  for(var i=0;i<16;i++) {
+   await l.board(pass(name:'SYNTHETIC/PAX${String.fromCharCode(65+i)}',seat:'${i+1}A',seq:'${i+1}'),random:true);
+  }
+  final bytes=searchForm(File('assets/forms/search.docx').readAsBytesSync(),spec,l.snapshot);
+  final xml=XmlDocument.parse(utf8.decode(ZipDecoder().decodeBytes(bytes).findFile('word/document.xml')!.content as List<int>));
+  expect(xml.findAllElements('w:tbl').length,2);
+  final ids=xml.findAllElements('wp:docPr').map((e)=>e.getAttribute('id')).toList();
+  expect(ids.toSet().length,ids.length);
+  final names=xml.findAllElements('w:t').map((e)=>e.innerText).join(' ');
+  for(var i=0;i<16;i++) {expect(names,contains('${i+1}) SYNTHETIC/PAX${String.fromCharCode(65+i)}'));}
+  Directory('build/form-qa').createSync(recursive:true);
+  File('build/form-qa/search_many.docx').writeAsBytesSync(bytes);
+ });
 }
