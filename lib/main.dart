@@ -22,6 +22,8 @@ import 'boarding_repository.dart';
 import 'firebase_options.dart';
 import 'ocr_adapter.dart';
 import 'web_preview.dart';
+import 'dispatch_screen.dart';
+import 'field_test_screen.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -29,11 +31,14 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
+
+const fieldTestBuild=bool.fromEnvironment('FIELD_TEST',defaultValue:false);
 
 class _AppPalette {
   static const Color midnight = Color(0xFF07111E);
@@ -264,8 +269,11 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations(const [
     DeviceOrientation.portraitUp,
   ]);
-  if (!kIsWeb) {
+  if (!kIsWeb && !fieldTestBuild) {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    await FirebaseFirestore.instance.clearPersistence();
+    FirebaseFirestore.instance.settings = const Settings(persistenceEnabled:false);
+    await FirebaseAppCheck.instance.activate(androidProvider: AndroidProvider.playIntegrity);
   }
   runApp(const GozenBoardingApp());
 }
@@ -301,7 +309,7 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       theme: _AppTheme.light(),
       darkTheme: _AppTheme.dark(),
       builder: (context, child) => _GlobalBackdrop(child: child ?? const SizedBox.shrink()),
-      home: kIsWeb ? WebPreviewScreen(liveBuilder: (_) => _WebAuthGate(
+      home: fieldTestBuild ? const FieldTestScreen() : kIsWeb ? WebPreviewScreen(liveBuilder: (_) => _WebAuthGate(
         onThemeChanged: setThemeMode, themeMode: _themeMode,
       )) : AuthGate(
         onThemeChanged: setThemeMode,
@@ -367,7 +375,7 @@ class AuthGate extends StatelessWidget {
                 TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Çıkış')),
               ])));
             }
-            return HomeScreen(onThemeChanged: onThemeChanged, themeMode: themeMode);
+            return DispatchScreen(logout:()=>FirebaseAuth.instance.signOut());
           },
         );
       },

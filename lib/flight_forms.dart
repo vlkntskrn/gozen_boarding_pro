@@ -1,0 +1,233 @@
+import 'dart:convert';
+import 'package:archive/archive.dart';
+import 'package:xml/xml.dart';
+import 'local_flight.dart';
+
+const dailyFields = <String,String>{
+ 'G3':'G.S.C','G4':'Station Manager','G5':'Check-in Supervisor','G6':'Gate Supervisor','G7':'Transit Supervisor',
+ 'G9':'Uçak tipi','G10':'Tescil','G11':'Shift başlangıcı','G12':'Shift bitişi','G13':'Pre briefing başlangıcı',
+ 'G14':'Pre briefing bitişi','G15':'Post briefing başlangıcı','G16':'Post briefing bitişi','G17':'Check-in podyum',
+ 'L3':'Kontuarı arayan','L4':'Gate arayan','L5':'Gate numarası','L6':'Boarding başlangıcı','L7':'Boarding bitişi',
+ 'L8':'Uçak arama başlangıcı','L9':'Uçak arama bitişi','L10':'Temizlik başlangıcı','L11':'Temizlik bitişi',
+ 'L13':'Transit yolcu','L14':'Profiling selectee','L15':'SSSS','L17':'Gate podyum',
+ 'P4':'ETA','P5':'ATA','P6':'ETD','P7':'ATD','P8':'Transit bagaj','P9':'Rush bagaj','P10':'Local bagaj',
+ 'P11':'Yetersiz doküman','P12':'Sahte doküman','P15':'ETD marka/model/seri',
+ 'O13':'Fiziksel arama (X)','O14':'ETD arama (X)','G18':'Notlar','G33':'Delay code',
+ 'B45':'Gate Team Leader 1','B46':'Gate Team Leader 2','B48':'Baggage Sorting Area Chief','B49':'Airside Operations Chief',
+};
+const baFields = <String,String>{
+ 'E13':'Uçak tipi','E14':'Tescil','E15':'Shift başlangıcı','E16':'Shift bitişi',
+ 'E17':'Pre briefing başlangıcı','E18':'Pre briefing bitişi','E19':'Post briefing başlangıcı','E20':'Post briefing bitişi',
+ 'L13':'ETA','L14':'ATA','L15':'ETD','L16':'ATD','L17':'Gate açılışı','L18':'Cabin crew varışı','L19':'Cabin crew kontrolü',
+ 'O12':'ETD marka/model/seri','O15':'Gate numarası','O16':'Transit bagaj','O17':'Rush bagaj','O18':'Local bagaj','O19':'Gate bagajı',
+ 'O20':'X-ray bagajı','N10':'Fiziksel arama (X)','N11':'ETD arama (X)','L24':'Notlar','M34':'Duty officer adı',
+ 'E35':'Gate Team Leader','E37':'A/C & Airside Ramp Chief',
+};
+const commonFields = <String,String>{
+ 'airline':'Havayolu adı','searchTl':'Aramayı yaptıran team leader','airlineRep':'Onaylayan havayolu temsilcisi',
+ 'agent1':'Aramayı yapan personel 1','agent2':'Aramayı yapan personel 2',
+ 'agent3':'Aramayı yapan personel 3','agent4':'Aramayı yapan personel 4',
+ 'staff':'Personel: her satıra ad soyad | pozisyon','equipment':'Ekipman: marka | model | seri',
+ 'preBrief':'Operasyon öncesi brifing: her satıra bir konu','postBrief':'Operasyon sonrası brifing: her satıra bir konu',
+};
+
+List<int> _rewrite(List<int> template, Map<String,List<int>> changes) {
+ final zip=ZipDecoder().decodeBytes(template,verify:true), out=Archive();
+ for(final f in zip.files) {final bytes=changes[f.name] ?? (f.content as List<int>);out.addFile(ArchiveFile(f.name,bytes.length,bytes));}
+ return ZipEncoder().encode(out)!;
+}
+void _wordText(XmlElement e,String value) {
+ final ts=e.findAllElements('w:t').toList();
+ if(ts.isNotEmpty) {ts.first.innerText=value;for(final t in ts.skip(1)) {t.innerText='';}}
+ else {
+  final p=e.name.qualified=='w:p'?e:e.findAllElements('w:p').first;
+  p.children.add(XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('t','w'),[],[XmlText(value)])]));
+ }
+}
+void _wordColumns(XmlElement p,String left,String right) {
+ final props=p.findElements('w:pPr').firstOrNull;
+ final runProps=p.findElements('w:r').firstOrNull?.findElements('w:rPr').firstOrNull?.copy();
+ p.children.clear();
+ final pp=props?.copy() ?? XmlElement(XmlName('pPr','w'));
+ pp.children.removeWhere((n)=>n is XmlElement && ['tabs','jc'].contains(n.name.local));
+ pp.children.add(XmlElement(XmlName('tabs','w'),[],[XmlElement(XmlName('tab','w'),[
+  XmlAttribute(XmlName('val','w'),'left'),XmlAttribute(XmlName('pos','w'),'5500')])]));
+ p.children.add(pp);
+ for(var i=0;i<2;i++) {
+  final value=i==0?left:right;
+  if(i==1) p.children.add(XmlElement(XmlName('r','w'),[],[XmlElement(XmlName('tab','w'))]));
+  p.children.add(XmlElement(XmlName('r','w'),[],[if(runProps!=null)runProps.copy(),
+   XmlElement(XmlName('t','w'),[XmlAttribute(XmlName('space','xml'),'preserve')],[XmlText(value)])]));
+ }
+}
+
+/// Preserve the uploaded Word template, including all consent translations and
+/// blank signature fields. Fifteen passengers per copy of the full form.
+List<int> searchForm(List<int> template,FlightSpec spec,Map<String,dynamic> data) {
+ final z=ZipDecoder().decodeBytes(template), file=z.findFile('word/document.xml')!;
+ final doc=XmlDocument.parse(utf8.decode(file.content as List<int>));
+ final body=doc.findAllElements('w:body').single;
+ final relationships=XmlDocument.parse(utf8.decode(z.findFile('word/_rels/document.xml.rels')!.content as List<int>));
+ final headerRels=XmlDocument.parse(utf8.decode(z.findFile('word/_rels/header1.xml.rels')!.content as List<int>));
+ final headerIds=<String,String>{};
+ for(final relation in headerRels.rootElement.childElements) {
+  final id='rIdFormHeader${headerIds.length}';
+  headerIds[relation.getAttribute('Id')!]=id;
+  final copy=relation.copy()..setAttribute('Id',id);
+  relationships.rootElement.children.add(copy);
+ }
+ List<XmlElement> furniture(String path)=>XmlDocument.parse(utf8.decode(z.findFile(path)!.content as List<int>))
+  .rootElement.childElements.where((p)=>p.findAllElements('w:t').any((t)=>t.innerText.trim().isNotEmpty) || p.findAllElements('w:drawing').isNotEmpty).toList();
+ final header=furniture('word/header1.xml'),footer=furniture('word/footer1.xml');
+ final original=body.children.where((n)=>n is! XmlElement || n.name.local!='sectPr').map((n)=>n.copy()).toList();
+ final section=body.findElements('w:sectPr').firstOrNull?.copy();
+ section?.children.removeWhere((n)=>n is XmlElement && ['headerReference','footerReference'].contains(n.name.local));
+ final searched=Map<String,dynamic>.from(data['pax']).values.where((p)=>p['searched']==true).toList();
+ final fields=Map<String,dynamic>.from(data['fields']);
+ body.children.clear();
+ final pages=searched.isEmpty?1:(searched.length/15).ceil();
+ if(pages>1000) throw const FormatException('Arama formu kapasitesi aşıldı.');
+ XmlElement pageBreak()=>XmlElement(XmlName('p','w'),[],[XmlElement(XmlName('r','w'),[],[
+  XmlElement(XmlName('br','w'),[XmlAttribute(XmlName('type','w'),'page')])])]);
+ for(var page=0;page<pages;page++) {
+  if(page>0) body.children.add(pageBreak());
+  // Put the template's actual logo/title/footer into each form body. Legacy
+  // DOC headers otherwise migrate to the last page when a form is repeated.
+  for(final item in header) {
+   final copy=item.copy();
+   for(final graphic in [...copy.findAllElements('wp:docPr'),...copy.findAllElements('pic:cNvPr')]) {
+    final id=int.tryParse(graphic.getAttribute('id')??'');
+    if(id!=null) graphic.setAttribute('id','${100000000+id+page*10000}');
+   }
+   for(final image in copy.findAllElements('a:blip')) {
+    final target=headerIds[image.getAttribute('r:embed')];
+    if(target!=null) image.setAttribute('r:embed',target);
+   }
+   body.children.add(copy);
+  }
+  final nodes=original.map((n)=>n.copy()).toList();
+  if(page>0) for(final n in nodes.whereType<XmlElement>()) {
+   for(final graphic in [...n.findAllElements('wp:docPr'),...n.findAllElements('pic:cNvPr')]) {
+    final id=int.tryParse(graphic.getAttribute('id')??'');
+    if(id!=null) graphic.setAttribute('id','${id+page*10000}');
+   }
+  }
+  for(final n in nodes.whereType<XmlElement>()) {
+   for(final p in [if(n.name.qualified=='w:p') n,...n.findAllElements('w:p')]) {
+    final text=p.findAllElements('w:t').map((t)=>t.innerText).join();
+    if(text.startsWith('TARİH (Date)')) _wordText(p,'TARİH (Date): ${spec.date}');
+    if(text.startsWith('HAVAYOLU (Airline)')) _wordText(p,'HAVAYOLU (Airline): ${fields['airline']??spec.code.replaceAll(RegExp(r'[0-9]'),'')}');
+    if(text.startsWith('UÇUŞ NO (Flight No)')) _wordText(p,'UÇUŞ NO (Flight No): ${spec.code} ${spec.origin}–${spec.destination}');
+   }
+   final table=n.name.qualified=='w:tbl'?n:null;
+   if(table==null) continue;
+   final rows=table.findElements('w:tr').skip(1).toList();
+   for(var i=0;i<rows.length;i++) {
+    final cells=rows[i].findElements('w:tc').toList(), index=page*15+i;
+    // Converted legacy form otherwise lets the last signature line spill.
+    for(final height in rows[i].findAllElements('w:trHeight')) {height.setAttribute('w:val','360');}
+    if(cells.length!=6) throw const FormatException('Arama formu şablonu değişmiş.');
+    final p=index<searched.length?searched[index]:null;
+    final values=p==null?['${index+1})','','','','','']:[
+      '${index+1}) ${p['name']}${p['lp']==true?' LP':''}',p['sequence']??'',p['nationality']??'',
+      '${p['remarks']??''}${p['status']=='OFFLOADED'?' OFFLOADED':''}','',''];
+    for(var c=0;c<6;c++) {_wordText(cells[c],values[c].toString());}
+   }
+  }
+  // Named signatories are typed; handwritten signatures stay blank.
+  var signatory=0;
+  for(final n in nodes.whereType<XmlElement>()) {
+   if(n.name.qualified!='w:p') continue;
+   final text=n.findAllElements('w:t').map((t)=>t.innerText).join();
+   if(text.startsWith('İMZA') && text.split('İMZA').length>2) {
+    _wordColumns(n,'İMZA (SIGNATURE): __________________','İMZA (SIGNATURE): __________________');
+    continue;
+   }
+   if(!text.startsWith('ADI-SOYADI')) continue;
+   final pair=signatory==0?['searchTl','airlineRep']:signatory==1?['agent1','agent2']:['agent3','agent4'];
+   _wordColumns(n,'ADI-SOYADI: ${fields[pair[0]]??''}','ADI-SOYADI: ${fields[pair[1]]??''}');signatory++;
+  }
+  final consent=nodes.indexWhere((n)=>n is XmlElement && n.findAllElements('wp:docPr').any((p)=>p.getAttribute('name')=='ISO ENTEGRE LOGO'));
+  if(consent<0) throw const FormatException('Onay sayfası şablonda bulunamadı.');
+  body.children.addAll(nodes.take(consent));
+  body.children.addAll(footer.map((p)=>p.copy()));
+  body.children.add(pageBreak());
+  body.children.addAll(nodes.skip(consent));
+ }
+ if(section!=null) body.children.add(section);
+ // Explicit complex-script sizes avoid LibreOffice/Word font-substitution
+ // expanding the supplied multilingual consent page into a third page.
+ for(final r in body.findAllElements('w:rPr')) {
+  final size=r.findElements('w:sz').firstOrNull;
+  if(size!=null) {
+   var cs=r.findElements('w:szCs').firstOrNull;
+   if(cs==null) {cs=XmlElement(XmlName('szCs','w'));r.children.add(cs);}
+   cs.setAttribute('w:val',size.getAttribute('w:val'));
+  }
+ }
+ return _rewrite(template,{'word/document.xml':utf8.encode(doc.toXmlString()),
+  'word/_rels/document.xml.rels':utf8.encode(relationships.toXmlString())});
+}
+
+/// Edit values directly in the existing OOXML cells so workbook drawings,
+/// print layout, styles, merged cells and logos remain untouched.
+List<int> dailyForm(List<int> template,FlightSpec spec,Map<String,dynamic> data) {
+ final z=ZipDecoder().decodeBytes(template), file=z.findFile('xl/worksheets/sheet1.xml')!;
+ final doc=XmlDocument.parse(utf8.decode(file.content as List<int>));
+ final rows=doc.findAllElements('row').toList();
+ void put(String ref,String value) {
+  final rn=RegExp(r'\d+').firstMatch(ref)!.group(0)!;
+  final row=rows.firstWhere((r)=>r.getAttribute('r')==rn);
+  var cell=row.findElements('c').where((c)=>c.getAttribute('r')==ref).firstOrNull;
+  if(cell==null) {cell=XmlElement(XmlName('c'),[XmlAttribute(XmlName('r'),ref)]);row.children.add(cell);}
+  cell.setAttribute('t','inlineStr'); cell.children.clear();
+  cell.children.add(XmlElement(XmlName('is'),[],[XmlElement(XmlName('t'),[XmlAttribute(XmlName('space','xml'),'preserve')],[XmlText(value)])]));
+ }
+ final pax=Map<String,dynamic>.from(data['pax']).values.toList();
+ final active=pax.where((p)=>['PREBOARDED','DFT_BOARDED'].contains(p['status'])).length;
+ final searched=pax.where((p)=>p['searched']==true).length;
+ final fields=Map<String,dynamic>.from(data['fields']);
+ final ba=spec.reportForm=='OPR-FRM-0012';
+ if(!ba) {
+  final times=Map<String,dynamic>.from(data['times']??{});
+  String time(dynamic value) {
+   final d=DateTime.tryParse('$value');
+   return d==null?'':'${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
+  }
+  if((fields['L6']??'').toString().isEmpty) fields['L6']=time(times['boardingStarted']);
+  if((fields['L7']??'').toString().isEmpty) fields['L7']=time(times['lastPassenger']);
+ }
+ for(final key in (ba?baFields:dailyFields).keys) {put(key,(fields[key]??'').toString());}
+ put(ba?'E12':'G8',spec.code);put(ba?'L12':'P3',spec.date);
+ put(ba?'O13':'L12',active.toString());put(ba?'O14':'L16',searched.toString());
+ final staff=(fields['staff']??'').toString().split('\n').where((s)=>s.trim().isNotEmpty).toList();
+ if(staff.length>(ba?10:35)) throw const FormatException('Personel sayısı form kapasitesini aşıyor.');
+ for(var i=0;i<(ba?10:35);i++) {
+  final parts=i<staff.length?staff[i].split('|'):['',''];
+  put(ba?'E${24+i}':'B${9+i}',ba?'':parts.first.trim());
+  if(ba) for(final col in ['F','G','H','I','J','K']) {put('$col${24+i}','');}
+  if(!ba) put('C${9+i}',parts.length>1?parts[1].trim():'');
+ }
+ if(ba) {
+  const slots=<String,List<int>>{
+   'B.ROOM':[24],'B.ROOM B.RECONCILIATION':[24],'RAMP':[25],'JETTY':[26],
+   'CARGO ESCORT':[27],'BACK/GATE SEARCH':[28],'BACK':[28],
+   'RANDOM SEARCH AIRSIDER GATE':[29,30,31],'AIRSIDER':[29,30,31],
+   'INTERVIEWER':[32],'CABIN CREW INTERVIEWER':[33],
+  };
+  final used=<int>{};
+  for(final line in staff) {
+   final parts=line.split('|');
+   final position=parts.length>1?parts[1].trim().toUpperCase().replaceAll(RegExp(r'\s+'),' '):'';
+   final row=slots[position]?.where((r)=>!used.contains(r)).firstOrNull;
+   if(row==null) throw FormatException('BA personel pozisyonu/geçerli boş satır bulunamadı: $position');
+   used.add(row);put('E$row',parts.first.trim());
+  }
+ }
+ if(!ba) for(final pair in [('preBrief','E'),('postBrief','M')]) {
+  final lines=(fields[pair.$1]??'').toString().split('\n');
+  if(lines.length>5) throw const FormatException('Brifing bölümü en fazla 5 satır içerir.');
+  for(var i=0;i<5;i++) {put('${pair.$2}${39+i}',i<lines.length?lines[i]:'');}
+ }
+ return _rewrite(template,{'xl/worksheets/sheet1.xml':utf8.encode(doc.toXmlString())});
+}

@@ -2,139 +2,50 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function approved() {
-      return request.auth != null &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
+      return request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
     }
-    function admin() {
-      return approved() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin';
-    }
-    function supervisor(f) {
-      let me = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
-      return approved() && me.role == 'Supervisor' &&
-        f.get('departureAirport', '') in me.get('allowedAirports', []);
-    }
-    function manager(f) { return approved() && (f.ownerUid == request.auth.uid || admin() || supervisor(f)); }
-    function member(f) { return approved() && (manager(f) || request.auth.uid in f.participants); }
-    function flight(fid) { return get(/databases/$(database)/documents/flights/$(fid)).data; }
-    function writable(fid) { return member(flight(fid)) && !flight(fid).get('closed', false) && !flight(fid).get('deleted', false); }
-    function pending(fid) {
-      let i = get(/databases/$(database)/documents/invites/$(fid + '_' + request.auth.uid)).data;
-      return approved() && i.inviteeUid == request.auth.uid && i.flightId == fid && i.status == 'PENDING';
+    function role() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role; }
+    function admin() { return approved() && role() == 'Admin'; }
+    function member(f) { return approved() && (role() in ['Admin','Supervisor'] || request.auth.uid in f.participants); }
+    function clean(f) {
+      return f.keys().hasOnly(['flightCode','departureAirport','arrivalAirport','etdDateText','bookedPax',
+        'ownerUid','participants','reportRecipients','createdAt','closed','closedAt','recordingDeviceHash','recordingUid']) &&
+        f.flightCode is string && f.departureAirport == 'DLM' && f.arrivalAirport.matches('^[A-Z]{3}$') &&
+        f.etdDateText.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') && f.participants is list &&
+        f.participants.size() <= 50 && f.reportRecipients is list && f.reportRecipients.size() <= 10;
     }
     match /users/{uid} {
-      // Controlled staff directory; profiles contain no passwords or tokens.
       allow read: if approved() || (request.auth != null && request.auth.uid == uid);
-      // Roles and activation are provisioned exclusively through trusted Admin SDK.
       allow write: if false;
     }
     match /flights/{fid} {
-      allow read: if member(resource.data) || pending(fid);
-      allow create: if approved() && request.resource.data.ownerUid == request.auth.uid &&
-        request.resource.data.participants == [] && request.resource.data.departureAirport == 'DLM' &&
-        !request.resource.data.get('closed', false);
-      allow update: if
-        (manager(resource.data) && request.resource.data.ownerUid == resource.data.ownerUid) ||
-        (writable(fid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['opTimes'])) ||
-        (approved() && !resource.data.get('closed', false) && pending(fid) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants']) &&
-          request.resource.data.participants.toSet() == resource.data.participants.toSet().union([request.auth.uid].toSet()) &&
-          getAfter(/databases/$(database)/documents/invites/$(fid + '_' + request.auth.uid)).data.status == 'ACCEPTED');
+      allow read: if member(resource.data);
+      allow create: if admin() && clean(request.resource.data) &&
+        request.resource.data.ownerUid == request.auth.uid && request.resource.data.closed == false &&
+        request.resource.data.createdAt == request.time &&
+        !request.resource.data.keys().hasAny(['recordingDeviceHash','recordingUid']);
+      allow update: if clean(request.resource.data) && (
+        (admin() && request.resource.data.ownerUid == resource.data.ownerUid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants','reportRecipients'])) ||
+        (member(resource.data) && !resource.data.closed &&
+          resource.data.get('recordingDeviceHash','') == '' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['recordingDeviceHash','recordingUid']) &&
+          request.resource.data.recordingDeviceHash.matches('^[a-f0-9]{64}$') && request.resource.data.recordingUid == request.auth.uid) ||
+        (member(resource.data) && resource.data.recordingUid == request.auth.uid && !resource.data.closed &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['closed','closedAt']) &&
+          request.resource.data.closed == true && request.resource.data.closedAt == request.time)
+      );
       allow delete: if false;
-
-      match /pax/{pid} {
-        function validBoarding() {
-          let d = request.resource.data;
-          let f = flight(fid);
-          return d.status in ['PREBOARDED', 'DFT_BOARDED'] &&
-            !d.keys().hasAny(['raw','rawBarcode','barcode']) &&
-            d.boardedByUid == request.auth.uid && d.boardedAt == request.time &&
-            d.validationDate == f.etdDateText && d.validationOrigin == 'DLM' &&
-            d.validationFlightCode == f.flightCode &&
-            (!d.watchlistMatch || d.status == 'DFT_BOARDED') &&
-            getAfter(/databases/$(database)/documents/flights/$(fid)/boarding_keys/$(d.boardingKey)).data.paxId == pid &&
-            getAfter(/databases/$(database)/documents/flights/$(fid)/boarding_keys/$(d.boardingKey)).data.active == true &&
-            d.seatLock == d.seat &&
-            (getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds.size() == 1 ||
-              (d.get('adultPaxId', '') == getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds[0] &&
-               pid == getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds[1])) &&
-            pid in getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds;
-        }
-        function noActiveInfant() {
-          let lock = get(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(resource.data.get('seatLock', 'legacy'))).data;
-          return resource.data.get('seatLock', '') == '' || resource.data.get('adultPaxId', null) != null ||
-            lock.paxIds.size() < 2 || lock.paxIds[0] != pid ||
-            getAfter(/databases/$(database)/documents/flights/$(fid)/pax/$(lock.paxIds[1])).data.status == 'OFFLOADED';
-        }
-        allow read: if member(flight(fid));
-        allow create: if
-          (manager(getAfter(/databases/$(database)/documents/flights/$(fid)).data) && request.resource.data.status == 'NONE') ||
-          (writable(fid) && validBoarding());
-        allow update: if writable(fid) &&
-          (!(resource.data.status in ['PREBOARDED', 'DFT_BOARDED']) && validBoarding() ||
-           (resource.data.status in ['PREBOARDED', 'DFT_BOARDED'] &&
-            request.resource.data.status == 'OFFLOADED' && noActiveInfant() &&
-            request.resource.data.offloadedByUid == request.auth.uid &&
-            request.resource.data.offloadedAt == request.time &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','offloadedAt','offloadedByUid','offloadedByEmail'])));
-        allow delete: if false;
-      }
-      match /boarding_keys/{key} {
-        allow read: if member(flight(fid));
-        function keyPayload() {
-          let d = request.resource.data;
-          let p = getAfter(/databases/$(database)/documents/flights/$(fid)/pax/$(d.paxId)).data;
-          return writable(fid) && d.byUid == request.auth.uid && d.at == request.time &&
-            p.boardingKey == key && (d.active == true ? p.status in ['PREBOARDED','DFT_BOARDED'] : p.status == 'OFFLOADED');
-        }
-        allow create: if keyPayload() && request.resource.data.active == true;
-        allow update: if keyPayload() && request.resource.data.paxId == resource.data.paxId &&
-          (resource.data.active == false || request.resource.data.active == false);
-        allow delete: if false;
-      }
-      match /seat_locks/{seat} {
-        allow read: if member(flight(fid));
-        function lockPayload() {
-          return writable(fid) && request.resource.data.byUid == request.auth.uid &&
-            request.resource.data.at == request.time && request.resource.data.paxIds is list &&
-            request.resource.data.paxIds.size() <= 2;
-        }
-        function released(pid) {
-          return pid in request.resource.data.paxIds ||
-            getAfter(/databases/$(database)/documents/flights/$(fid)/pax/$(pid)).data.status == 'OFFLOADED';
-        }
-        allow create: if lockPayload();
-        allow update: if lockPayload() &&
-          (resource.data.paxIds.size() == 0 || released(resource.data.paxIds[0])) &&
-          (resource.data.paxIds.size() < 2 || released(resource.data.paxIds[1]));
-        allow delete: if false;
-      }
       match /logs/{id} {
-        allow read: if member(flight(fid));
+        allow read: if member(get(/databases/$(database)/documents/flights/$(fid)).data);
         allow create: if member(getAfter(/databases/$(database)/documents/flights/$(fid)).data) &&
-          request.resource.data.byUid == request.auth.uid && request.resource.data.at == request.time &&
-          !request.resource.data.get('meta', {}).keys().hasAny(['raw','rawBarcode','barcode']);
-        allow update, delete: if false;
+          request.resource.data.keys().hasOnly(['type','byUid','at']) &&
+          request.resource.data.type in ['FLIGHT_CREATED','ASSIGNMENT_CHANGED','RECORDER_CLAIMED','FLIGHT_CLOSED'] &&
+          request.resource.data.byUid == request.auth.uid && request.resource.data.at == request.time;
+        allow update,delete: if false;
       }
-      match /{collection}/{id} {
-        allow read: if collection in ['watchlist','staff','equipment'] && member(flight(fid));
-        allow create: if collection in ['watchlist','staff','equipment'] &&
-          manager(getAfter(/databases/$(database)/documents/flights/$(fid)).data);
-        allow update, delete: if collection in ['watchlist','staff','equipment'] && manager(flight(fid)) && !flight(fid).get('closed', false);
-      }
+      match /{path=**} { allow read,write: if false; }
     }
-    match /invites/{id} {
-      allow read: if approved() && (resource.data.inviteeUid == request.auth.uid || manager(flight(resource.data.flightId)));
-      allow create: if manager(flight(request.resource.data.flightId)) &&
-        id == request.resource.data.flightId + '_' + request.resource.data.inviteeUid &&
-        request.resource.data.inviteeUid != '' && request.resource.data.status == 'PENDING' &&
-        get(/databases/$(database)/documents/users/$(request.resource.data.inviteeUid)).data.active == true;
-      allow update: if approved() && resource.data.inviteeUid == request.auth.uid &&
-        resource.data.status == 'PENDING' && request.resource.data.status == 'ACCEPTED' &&
-        request.resource.data.acceptedByUid == request.auth.uid && request.resource.data.acceptedAt == request.time &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','acceptedAt','acceptedByUid']) &&
-        request.auth.uid in getAfter(/databases/$(database)/documents/flights/$(resource.data.flightId)).data.participants;
-      allow delete: if false;
-    }
-    match /{document=**} { allow read, write: if false; }
+    match /{path=**} { allow read,write: if false; }
   }
 }
