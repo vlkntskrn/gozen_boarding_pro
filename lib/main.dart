@@ -264,7 +264,9 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations(const [
     DeviceOrientation.portraitUp,
   ]);
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  if (!kIsWeb) {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  }
   runApp(const GozenBoardingApp());
 }
 
@@ -299,7 +301,7 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       theme: _AppTheme.light(),
       darkTheme: _AppTheme.dark(),
       builder: (context, child) => _GlobalBackdrop(child: child ?? const SizedBox.shrink()),
-      home: kIsWeb ? WebPreviewScreen(liveBuilder: (_) => AuthGate(
+      home: kIsWeb ? WebPreviewScreen(liveBuilder: (_) => _WebAuthGate(
         onThemeChanged: setThemeMode, themeMode: _themeMode,
       )) : AuthGate(
         onThemeChanged: setThemeMode,
@@ -307,6 +309,28 @@ class _GozenBoardingAppState extends State<GozenBoardingApp> {
       ),
     );
   }
+}
+
+class _WebAuthGate extends StatefulWidget {
+  final void Function(bool isDark) onThemeChanged;
+  final ThemeMode themeMode;
+  const _WebAuthGate({required this.onThemeChanged, required this.themeMode});
+  @override
+  State<_WebAuthGate> createState() => _WebAuthGateState();
+}
+
+class _WebAuthGateState extends State<_WebAuthGate> {
+  late final Future<FirebaseApp> _ready = Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform);
+  @override
+  Widget build(BuildContext context) => FutureBuilder<FirebaseApp>(future: _ready,
+    builder: (context, snap) {
+      if (snap.hasError) return Scaffold(appBar: AppBar(title: const Text('Yetkili Giriş')),
+        body: const Center(child: Padding(padding: EdgeInsets.all(24), child: Text(
+          'Sunucu bağlantısı kurulamadı. İnternet bağlantınızı ve Firebase web yapılandırmasını kontrol edin.'))));
+      if (!snap.hasData) return const _Splash();
+      return AuthGate(onThemeChanged: widget.onThemeChanged, themeMode: widget.themeMode);
+    });
 }
 
 class AuthGate extends StatelessWidget {
