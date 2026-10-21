@@ -8,6 +8,7 @@ void main(){
   expect(find.text('GOZEN • Android Saha Testi'),findsOneWidget);
   expect(find.textContaining('Admin hesabı oluşturmaz'),findsOneWidget);
   expect(find.text('LS164 • DLM–GLA'),findsOneWidget);
+  await tester.scrollUntilVisible(find.text('Test uçuşunu aç / kaldığı yerden devam et'),200);
   expect(find.text('Test uçuşunu aç / kaldığı yerden devam et'),findsOneWidget);
  });
 }
