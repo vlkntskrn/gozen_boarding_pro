@@ -12,22 +12,55 @@ class WebPreviewScreen extends StatefulWidget {
   State<WebPreviewScreen> createState() => _WebPreviewScreenState();
 }
 
+class _PreviewFlight {
+  final String code, date, destination;
+  final watchlist = <String>['ALARM/YOLCU'];
+  final pax = <String, Map<String, String>>{};
+  final logs = <String>[];
+  bool closed = false;
+  _PreviewFlight(this.code, this.date, this.destination);
+}
+
 class _WebPreviewScreenState extends State<WebPreviewScreen> {
   final _raw = TextEditingController();
   final _name = TextEditingController();
-  final _watchlist = <String>['ALARM/YOLCU'];
-  final _pax = <String, Map<String, String>>{};
-  final _logs = <String>[];
+  final _flights = [
+    _PreviewFlight('LS1730', '2026-10-21', 'MAN'),
+    _PreviewFlight('OR3057', '2026-10-22', 'AMS'),
+    _PreviewFlight('BY412', '2026-10-21', 'LGW'),
+  ];
+  _PreviewFlight? _selected;
+  List<String> get _watchlist => _selected!.watchlist;
+  Map<String, Map<String, String>> get _pax => _selected!.pax;
+  List<String> get _logs => _selected!.logs;
+  String get _date => _selected!.date;
+  String get _code => _selected!.code;
+  bool get _closed => _selected!.closed;
+  set _closed(bool value) => _selected!.closed = value;
   bool _random = false;
-  bool _closed = false;
   bool _busy = false;
-  static const _date = '2026-10-21';
 
-  String _sample({bool watch = false, bool wrong = false}) =>
-      'M1${(watch ? 'ALARM/YOLCU' : 'DEMO/YOLCU').padRight(20)}E'
-      '${'DEMO01'.padRight(7)}${wrong ? 'BJV' : 'DLM'}MANLS '
-      '${'1730'.padRight(5)}294Y${watch ? '014C' : '012A'}'
+  String _sample({bool watch = false, bool wrong = false}) {
+    final date = strictDate(_date)!;
+    final julian = (date.difference(DateTime.utc(date.year)).inDays + 1).toString().padLeft(3, '0');
+    return 'M1${(watch ? 'ALARM/YOLCU' : 'DEMO/YOLCU').padRight(20)}E'
+      '${'DEMO01'.padRight(7)}${wrong ? 'BJV' : 'DLM'}${_selected!.destination}${_code.substring(0,2).padRight(3)}'
+      '${_code.substring(2).padRight(5)}${julian}Y${watch ? '014C' : '012A'}'
       '${(watch ? '00124' : '00123').padRight(5)}100';
+  }
+
+  void _openFlight(_PreviewFlight flight) => setState(() {
+    _selected = flight;
+    _raw.clear();
+    _name.clear();
+    _random = false;
+  });
+
+  void _flightList() => setState(() {
+    _selected = null;
+    _raw.clear();
+    _name.clear();
+  });
 
   @override
   void dispose() { _raw.dispose(); _name.dispose(); super.dispose(); }
@@ -52,8 +85,8 @@ class _WebPreviewScreenState extends State<WebPreviewScreen> {
     setState(() => _busy = true);
     try {
       final legs = parseBcbp(_raw.text);
-      final pass = legs.length == 1 ? legs.single : selectBcbpLeg(legs, 'LS1730', _date);
-      final error = validationError(pass, 'LS1730', _date);
+      final pass = legs.length == 1 ? legs.single : selectBcbpLeg(legs, _code, _date);
+      final error = validationError(pass, _code, _date);
       if (error != null) { await _result(Colors.purple, 'WRONG FLIGHT', error); return; }
       final key = pass.sequence.isNotEmpty ? pass.sequence : '${pass.fullName}|${pass.seat}';
       if (_pax[key]?['status'] == 'PREBOARDED' || _pax[key]?['status'] == 'DFT_BOARDED') {
@@ -83,9 +116,10 @@ class _WebPreviewScreenState extends State<WebPreviewScreen> {
     }
     final csv = ['FULL_NAME,PNR,SEAT,STATUS', ..._pax.values.map((p) =>
       [p['name']!,p['pnr']!,p['seat']!,p['status']!].map(cell).join(','))].join('\r\n');
+    final filename = 'GOZEN_DEMO_${_code}_$_date.csv';
     final file = XFile.fromData(Uint8List.fromList(utf8.encode('\uFEFF$csv')),
-      mimeType:'text/csv', name:'GOZEN_DEMO_LS1730.csv');
-    try { await Share.shareXFiles([file], fileNameOverrides:['GOZEN_DEMO_LS1730.csv']); }
+      mimeType:'text/csv', name:filename);
+    try { await Share.shareXFiles([file], fileNameOverrides:[filename]); }
     catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('İndirme açılamadı. Tarayıcının indirme izinlerini kontrol edin.'))); }
   }
@@ -96,8 +130,8 @@ class _WebPreviewScreenState extends State<WebPreviewScreen> {
         const SizedBox(height: 16), child])));
 
   Widget _scanTab() => ListView(padding: const EdgeInsets.all(16), children: [
-    _panel('LS1730 • DLM → MAN', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Text('21 Ekim 2026 • ${_closed ? 'KAPALI' : 'AÇIK'} • ${_pax.length} örnek yolcu'),
+    _panel('$_code • DLM → ${_selected!.destination}', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Text('$_date • ${_closed ? 'KAPALI' : 'AÇIK'} • ${_pax.length} örnek yolcu'),
       const SizedBox(height: 16),
       const Text('Kart doğrulamasını dene', style: TextStyle(fontWeight: FontWeight.bold)),
       const SizedBox(height: 8),
@@ -122,9 +156,35 @@ class _WebPreviewScreenState extends State<WebPreviewScreen> {
     ])),
   ]);
 
+  Widget _flightsPage() => Scaffold(
+    appBar: AppBar(title: const Text('GOZEN BOARDING PRO'), actions: [
+      TextButton.icon(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: widget.liveBuilder)),
+        icon: const Icon(Icons.lock_outline), label: const Text('Yetkili Giriş')),
+    ]),
+    body: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1100),
+      child: ListView(padding: const EdgeInsets.all(16), children: [
+        _panel('Uçuş Seçimi', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          const Text('WEB ÖNİZLEME • Aşağıdaki uçuşlar örnektir. Gerçek uçuş listesi için Yetkili Giriş kullanılır.'),
+          const SizedBox(height: 16),
+          const Text('İşlem yapmak istediğin uçuşu seç. Her uçuşun yolcu, watchlist ve işlem kayıtları ayrıdır.'),
+          const SizedBox(height: 12),
+          for (final flight in _flights) Card(margin: const EdgeInsets.only(top: 10),
+            child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              leading: const Icon(Icons.flight_takeoff),
+              title: Text(flight.code, style: const TextStyle(fontWeight: FontWeight.w800)),
+              subtitle: Text('DLM → ${flight.destination} • ${flight.date}\n${flight.closed ? 'KAPALI' : 'AÇIK'} • ${flight.pax.length} örnek yolcu'),
+              isThreeLine: true, trailing: const Icon(Icons.chevron_right),
+              onTap: () => _openFlight(flight))),
+        ])),
+      ]),
+    )),
+  );
+
   @override
-  Widget build(BuildContext context) => DefaultTabController(length:7, child: Scaffold(
-    appBar:AppBar(title:const Text('GOZEN BOARDING PRO'), actions:[
+  Widget build(BuildContext context) => _selected == null ? _flightsPage() : DefaultTabController(length:7, child: Scaffold(
+    appBar:AppBar(leading: BackButton(onPressed: _flightList),
+      title:Text('GOZEN BOARDING PRO • $_code'), actions:[
+      TextButton(onPressed: _busy ? null : _flightList, child: const Text('Uçuş Değiştir')),
       TextButton.icon(onPressed:() => Navigator.push(context, MaterialPageRoute(builder:widget.liveBuilder)),
         icon:const Icon(Icons.lock_outline), label:const Text('Yetkili Giriş')),
     ], bottom:const TabBar(isScrollable:true, tabs:[

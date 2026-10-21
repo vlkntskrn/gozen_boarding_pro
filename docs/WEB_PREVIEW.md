@@ -4,6 +4,9 @@ This is the same Flutter application, compiled for the browser. The browser
 opens a clearly labelled, in-memory walkthrough first. Its seven tabs and
 sample-card validation do not use Firebase and do not persist passenger data.
 Refreshing the page clears the demo. All sample names and equipment are fictional.
+The opening flight list offers LS1730, OR3057 and BY412. Use **Uçuş Değiştir**
+to return to it. Passenger records, watchlists, logs and closure state belong to
+each selected flight; card validation uses that flight's code and date.
 
 Use **Yetkili Giriş** to open the existing Firebase Auth / Firestore application.
 The active-profile and security migration documented in SECURITY_HANDOVER.md
