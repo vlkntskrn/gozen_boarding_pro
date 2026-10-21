@@ -18,7 +18,7 @@ class BoardingRepository {
   bool _boarded(Map<String, dynamic> d) =>
       ['PREBOARDED', 'DFT_BOARDED'].contains(d['status']);
 
-  Future<void> board(
+  Future<bool> board(
     BoardingPass pass, {
     required bool random,
     required bool watchlist,
@@ -159,6 +159,7 @@ class BoardingRepository {
         },
       });
     });
+    return watchlist;
   }
 
   /// Offload an adult and its linked infant atomically. The UI must confirm

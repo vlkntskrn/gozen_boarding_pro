@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [ "main", "fix/security-boarding-validation" ]
-  pull_request:
-    branches: [ "main" ]
 
 jobs:
   build-apk:

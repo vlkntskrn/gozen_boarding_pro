@@ -490,7 +490,7 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1517,7 +1517,7 @@ class _CreateFlightScreenState extends State<CreateFlightScreen> {
 
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2408,57 +2408,27 @@ class _ScanTabState extends State<ScanTab> {
     );
   }
 
-  Future<void> _showResultScreen({
-    required Color bg,
-    required String title,
-    String? subtitle,
-  }) async {
+  Future<void> _showResultScreen({required Color bg, required String title, String? subtitle}) async {
+    if (!mounted) return;
     final fg = bg.computeLuminance() < 0.35 ? Colors.white : Colors.black;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (_) => Dialog(
-        child: Container(
-          width: 360,
-          padding: const EdgeInsets.all(16),
-          color: bg,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              if (subtitle != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  subtitle,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: fg,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              )
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (ctx) => Dialog.fullscreen(child: ColoredBox(color: bg,
+        child: SafeArea(child: Center(child: Padding(padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(title, textAlign: TextAlign.center,
+              style: TextStyle(color: fg, fontSize: 30, fontWeight: FontWeight.w900)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 20),
+              Text(subtitle, textAlign: TextAlign.center, style: TextStyle(color: fg, fontSize: 20)),
             ],
-          ),
-        ),
-      ),
+            const SizedBox(height: 24),
+            FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          ]),
+        )))),
+      )),
     );
   }
 
-  // Manual "scan" format: FLIGHTCODE|FULLNAME|SEAT|PNR
   Future<void> _processScanString(String raw, {bool manualEntry = false}) async {
     final f = (await widget.flightRef.get(const GetOptions(source: Source.server))).data();
     if (f == null || f['closed'] == true) throw Exception('Uçuş kapalı/bulunamadı.');
@@ -2503,15 +2473,16 @@ class _ScanTabState extends State<ScanTab> {
     if (choice == null) return;
     _confirmedAdultId = null;
     if (await _handleSeatDuplicateOrInfant(fullName: pass.fullName, seat: pass.seat, pnr: pass.pnr)) return;
+    var confirmedWatchlist = isWl;
     try {
-      await BoardingRepository(widget.flightRef, widget.currentUid).board(pass,
+      confirmedWatchlist = await BoardingRepository(widget.flightRef, widget.currentUid).board(pass,
         random: choice == 'RANDOM', watchlist: isWl, manual: manualEntry, adultId: _confirmedAdultId);
     } on DuplicateBoarding {
       await _showResultScreen(bg: Colors.grey, title: 'ALREADY BOARDED / DUPLICATE');
       return;
     }
-    await _showResultScreen(bg: isWl ? Colors.red : choice == 'PRE' ? Colors.green : Colors.blue,
-      title: isWl ? 'FLY PASSENGER ATTENTION!!!' : choice == 'PRE' ? 'PRE-BOARD SUCCESSFUL' : 'DFT RANDOM SUCCESSFUL');
+    await _showResultScreen(bg: confirmedWatchlist ? Colors.red : choice == 'PRE' ? Colors.green : Colors.blue,
+      title: confirmedWatchlist ? 'FLY PASSENGER ATTENTION!!!' : choice == 'PRE' ? 'PRE-BOARD SUCCESSFUL' : 'DFT RANDOM SUCCESSFUL');
   }
 
   String? _confirmedAdultId;
@@ -2725,11 +2696,12 @@ class _ScanTabState extends State<ScanTab> {
     try {
       String inviteeEmail = normalizedInput;
       String inviteeUid = '';
-      QuerySnapshot<Map<String, dynamic>> userQ = await Db.users().where('usernameLower', isEqualTo: inviteeUsernameLower).limit(1).get();
-      if (userQ.docs.isEmpty && normalizedInput.contains('@')) {
-        userQ = await Db.users().where('email', isEqualTo: normalizedInput).limit(1).get();
-      }
-      if (userQ.docs.isNotEmpty) {
+      final userQ = await Db.users().where(
+        normalizedInput.contains('@') ? 'email' : 'usernameLower',
+        isEqualTo: normalizedInput.contains('@') ? normalizedInput : inviteeUsernameLower,
+      ).limit(2).get(const GetOptions(source: Source.server));
+      if (userQ.docs.length > 1) throw Exception('Kullanıcı adı belirsiz. Tam email adresi kullanın.');
+      if (userQ.docs.length == 1) {
         final u = userQ.docs.first;
         final ud = u.data();
         inviteeUid = u.id;
@@ -2851,6 +2823,7 @@ class _ScanTabState extends State<ScanTab> {
   @override
   void dispose() {
     _tabs?.removeListener(_tabChanged);
+    _lastCamRaw = null;
     _manualScan.dispose();
     _ocrTextRecognizer.close();
     _scannerController.dispose();

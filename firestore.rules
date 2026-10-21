@@ -54,6 +54,9 @@ service cloud.firestore {
             getAfter(/databases/$(database)/documents/flights/$(fid)/boarding_keys/$(d.boardingKey)).data.paxId == pid &&
             getAfter(/databases/$(database)/documents/flights/$(fid)/boarding_keys/$(d.boardingKey)).data.active == true &&
             d.seatLock == d.seat &&
+            (getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds.size() == 1 ||
+              (d.get('adultPaxId', '') == getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds[0] &&
+               pid == getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds[1])) &&
             pid in getAfter(/databases/$(database)/documents/flights/$(fid)/seat_locks/$(d.seatLock)).data.paxIds;
         }
         allow read: if member(flight(fid));

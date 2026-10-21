@@ -14,8 +14,23 @@ class BoardingPass {
     this.julianDay,
     this.travelDate,
   });
+  String get surname => fullName.contains('/') ? fullName.split('/').first.trim() : '';
+  List<String> get _givenAndTitle {
+    if (!fullName.contains('/')) return [fullName, ''];
+    final given = fullName.split('/').last.trim();
+    for (final t in ['MASTER', 'MSTR', 'MISS', 'MRS', 'MR', 'MS', 'DR']) {
+      if (given.endsWith(t) && given.length > t.length + 1) {
+        return [given.substring(0, given.length - t.length).trim(), t];
+      }
+    }
+    return [given, ''];
+  }
+  String get givenName => _givenAndTitle[0];
+  String get title => _givenAndTitle[1];
+
   Map<String, String> toMap() => {
     'fullName': fullName,
+    'surname': surname, 'givenName': givenName, 'title': title,
     'pnr': pnr,
     'origin': origin,
     'destination': destination,

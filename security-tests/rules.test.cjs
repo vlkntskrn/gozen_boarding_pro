@@ -103,3 +103,20 @@ test('active seat occupant cannot be dropped from lock', async () => {
   await assertSucceeds(boardBatch(f).commit());
   await assertFails(setDoc(doc(f,'flights/f1/seat_locks/1A'),{paxIds:[],byUid:'agent',at:serverTimestamp()}));
 });
+
+test('concurrent attempts accept one boarding and preserve its record', async () => {
+  const results=await Promise.allSettled([boardBatch(db('agent')).commit(),boardBatch(db('agent')).commit()]);
+  require('node:assert/strict').equal(results.filter(r=>r.status === 'fulfilled').length,1);
+  const record=await getDoc(doc(db('agent'),'flights/f1/pax/p1'));
+  require('node:assert/strict').equal(record.data().status,'PREBOARDED');
+});
+test('offload releases locks atomically and allows audited reboarding', async () => {
+  const f=db('agent');
+  await assertSucceeds(boardBatch(f).commit());
+  const b=writeBatch(f);
+  b.update(doc(f,'flights/f1/pax/p1'),{status:'OFFLOADED',offloadedByUid:'agent',offloadedAt:serverTimestamp()});
+  b.set(doc(f,'flights/f1/boarding_keys/k1'),{active:false,paxId:'p1',byUid:'agent',at:serverTimestamp()});
+  b.set(doc(f,'flights/f1/seat_locks/1A'),{paxIds:[],byUid:'agent',at:serverTimestamp()});
+  await assertSucceeds(b.commit());
+  await assertSucceeds(boardBatch(f).commit());
+});

@@ -36,6 +36,7 @@ void main() {
     final p = parseBcbp(ls1730).single;
     expect(p.fullName, 'HELLEWELL/BLAKEMR');
     expect(p.pnr, '3Z58D4');
+    expect(p.surname, 'HELLEWELL'); expect(p.givenName, 'BLAKE'); expect(p.title, 'MR');
     expect(p.flightCode, 'LS1730');
     expect(p.seat, '32F');
     expect(p.sequence, '0137');
